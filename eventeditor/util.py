@@ -1,9 +1,11 @@
 import evfl.evfl
 import evfl.actor
 import evfl.event
+import eventeditor.totk_zs as totk_zs
 import gzip
 import io
 import os
+from pathlib import Path
 import typing
 import PyQt5.QtCore as qc # type: ignore
 import PyQt5.QtWidgets as q # type: ignore
@@ -14,7 +16,8 @@ def read_flow(path: str, flow: evfl.evfl.EventFlow):
             flow.read(f.read())
     else:
         with open(path, 'rb') as f:
-            flow.read(f.read())
+            data = f.read()
+        flow.read(totk_zs.decompress(path, data))
 
 def write_flow(path: str, flow: evfl.evfl.EventFlow):
     try:
@@ -23,6 +26,11 @@ def write_flow(path: str, flow: evfl.evfl.EventFlow):
             flow.write(buf)
             with gzip.open(path + '.tmp', 'wb') as f:
                 f.write(buf.getbuffer())
+        elif totk_zs.is_compressed_path(path):
+            buf = io.BytesIO()
+            flow.write(buf)
+            with open(path + '.tmp', 'wb') as f:
+                f.write(totk_zs.compress(path, buf.getvalue()))
         else:
             with open(path + '.tmp', 'wb') as f:
                 flow.write(f)
@@ -36,6 +44,14 @@ def write_flow(path: str, flow: evfl.evfl.EventFlow):
 
 def get_path(rel_path: str):
     return os.path.join(os.path.dirname(os.path.realpath(__file__)), rel_path)
+
+def get_icon_path() -> typing.Optional[str]:
+    package_dir = Path(os.path.realpath(__file__)).parent
+    candidates = (package_dir / 'assets' / 'icon.ico',)
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 def get_event_type(event: evfl.event.Event) -> str:
     if isinstance(event.data, evfl.event.ActionEvent):

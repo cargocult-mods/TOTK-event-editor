@@ -30,6 +30,7 @@ setuptools.setup(
         'aamp~=1.0',
         'byml~=2.0',
         'oead~=1.1',
+        'zstandard>=0.18',
     ],
     python_requires='>=3.6',
     entry_points={
