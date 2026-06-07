@@ -1,6 +1,9 @@
 # TOTK-event-editor
 
+## [Downloads](https://github.com/cargocult-mods/TOTK-event-editor/releases)
+
 Maintained by [cargocult-mods](https://github.com/cargocult-mods) and [Codex](https://github.com/openai/codex).
+
 
 TOTK-event-editor is a maintained EventEditor fork developed around Tears of the
 Kingdom modding workflow. It keeps the original EventEditor workflow while adding
