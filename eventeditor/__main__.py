@@ -22,6 +22,12 @@ import PyQt5.QtGui as qg # type: ignore
 import PyQt5.QtWidgets as q # type: ignore
 from . import _version
 
+APP_DISPLAY_NAME = 'TOTK EventEditor'
+APP_INTERNAL_NAME = 'eventeditor'
+GITHUB_REPOSITORY_SLUG = 'cargocult-mods/TOTK-event-editor'
+GITHUB_REPOSITORY_URL = f'https://github.com/{GITHUB_REPOSITORY_SLUG}'
+UPSTREAM_REPOSITORY_URL = 'https://github.com/zeldamods/event-editor'
+
 DARK_THEME_STYLESHEET = '''
 QWidget {
     color: #f0f0f0;
@@ -366,6 +372,23 @@ def describe_flow_change_reason(reason: FlowDataChangeReason) -> str:
         return 'Edit actors'
     return 'Edit flow'
 
+def build_about_html(version: str, revision: str) -> str:
+    return (
+        f'<h2>{APP_DISPLAY_NAME}</h2>'
+        '<p>A maintained EventEditor fork developed around Tears of the Kingdom modding workflows.</p>'
+        f'<p><b>GitHub:</b> <a href="{GITHUB_REPOSITORY_URL}">{GITHUB_REPOSITORY_SLUG}</a></p>'
+        f'<p><b>Upstream:</b> <a href="{UPSTREAM_REPOSITORY_URL}">zeldamods/event-editor</a></p>'
+        '<p><small>'
+        f'Version: {version}<br>'
+        f'Revision: {revision}'
+        '</small></p>'
+    )
+
+def set_application_display_name(display_name: str) -> None:
+    setter = getattr(qc.QCoreApplication, 'setApplicationDisplayName', None)
+    if callable(setter):
+        setter(display_name)
+
 class FlowUndoCommand(q.QUndoCommand):
     def __init__(self, window: 'MainWindow', before_snapshot: bytes, after_snapshot: bytes, text: str) -> None:
         super().__init__(text)
@@ -601,6 +624,18 @@ class MainWindow(q.QMainWindow):
         self.exit_action.triggered.connect(self.close)
         file_menu.addAction(self.exit_action)
 
+        edit_menu = menu.addMenu('&Edit')
+        self.undo_button_action = q.QAction('Undo', self)
+        self.undo_button_action.setShortcut(qg.QKeySequence.Undo)
+        self.undo_button_action.triggered.connect(self.undo_stack.undo)
+        self.undo_button_action.setEnabled(False)
+        edit_menu.addAction(self.undo_button_action)
+        self.redo_button_action = q.QAction('Redo', self)
+        self.redo_button_action.setShortcut(qg.QKeySequence.Redo)
+        self.redo_button_action.triggered.connect(self.undo_stack.redo)
+        self.redo_button_action.setEnabled(False)
+        edit_menu.addAction(self.redo_button_action)
+
         view_menu = menu.addMenu('Flowc&hart')
         self.event_name_visible_action = q.QAction('Show &names', self)
         self.event_name_visible_action.setCheckable(True)
@@ -649,38 +684,26 @@ class MainWindow(q.QMainWindow):
         self.clear_mals_path_action.triggered.connect(self.onClearMalsPath)
         self.clear_mals_path_action.setEnabled(False)
         settings_menu.addAction(self.clear_mals_path_action)
+        settings_menu.addSeparator()
+        self.theme_toggle_action = q.QAction('', self)
+        self.theme_toggle_action.triggered.connect(self.toggleTheme)
+        settings_menu.addAction(self.theme_toggle_action)
+        self.updateThemeToggleAction()
 
         help_menu = menu.addMenu('&Help')
         wiki_action = q.QAction('Wiki', self)
         wiki_action.triggered.connect(lambda: qg.QDesktopServices.openUrl(qc.QUrl('https://zeldamods.org')))
         help_menu.addAction(wiki_action)
         github_repo_action = q.QAction('GitHub repository', self)
-        github_repo_action.triggered.connect(lambda: qg.QDesktopServices.openUrl(qc.QUrl('https://github.com/leoetlino/event-editor')))
+        github_repo_action.triggered.connect(lambda: qg.QDesktopServices.openUrl(qc.QUrl(GITHUB_REPOSITORY_URL)))
         help_menu.addAction(github_repo_action)
         help_menu.addSeparator()
         about_action = q.QAction('About', self)
         about_action.triggered.connect(self.about)
         help_menu.addAction(about_action)
 
-        self.undo_button_action = q.QAction('Undo', self)
-        self.undo_button_action.setShortcut(qg.QKeySequence.Undo)
-        self.undo_button_action.triggered.connect(self.undo_stack.undo)
-        self.undo_button_action.setEnabled(False)
-        menu.insertAction(help_menu.menuAction(), self.undo_button_action)
-        self.redo_button_action = q.QAction('Redo', self)
-        self.redo_button_action.setShortcut(qg.QKeySequence.Redo)
-        self.redo_button_action.triggered.connect(self.undo_stack.redo)
-        self.redo_button_action.setEnabled(False)
-        menu.insertAction(help_menu.menuAction(), self.redo_button_action)
-
-        self.theme_toggle_action = q.QAction('', self)
-        self.theme_toggle_action.triggered.connect(self.toggleTheme)
-        menu.addAction(self.theme_toggle_action)
-        self.updateThemeToggleAction()
-
     def about(self) -> None:
-        q.QMessageBox.about(self, 'About EventEditor', f'<h2>EventEditor</h2><p>EventEditor is an open-source event flow editor for <i>The Legend of Zelda: Breath of the Wild.</i></p><p><small>Version: {self._version}<br>Revision: {self._version_rev}</small></p>')
-        pass
+        q.QMessageBox.about(self, f'About {APP_DISPLAY_NAME}', build_about_html(self._version, self._version_rev))
 
     def initWidgets(self) -> None:
         self.tab_widget = q.QTabWidget(self)
@@ -1033,10 +1056,10 @@ class MainWindow(q.QMainWindow):
 
     def updateTitleAndActions(self) -> None:
         if not self.flow:
-            self.setWindowTitle('EventEditor')
+            self.setWindowTitle(APP_DISPLAY_NAME)
         else:
             indicator = '*' if self.unsaved else ''
-            self.setWindowTitle(f'EventEditor - {indicator}{self.flow.name}')
+            self.setWindowTitle(f'{APP_DISPLAY_NAME} - {indicator}{self.flow.name}')
 
         self.open_autosave_action.setEnabled(bool(self.flow) and bool(self.flow_path))
         self.save_action.setEnabled(bool(self.flow) and bool(self.flow_path))
@@ -1202,12 +1225,13 @@ class MainWindow(q.QMainWindow):
 
 def main() -> None:
     qc.QCoreApplication.setOrganizationName('eventeditor')
-    qc.QCoreApplication.setApplicationName('eventeditor')
+    qc.QCoreApplication.setApplicationName(APP_INTERNAL_NAME)
+    set_application_display_name(APP_DISPLAY_NAME)
     qc.QSettings.setDefaultFormat(qc.QSettings.IniFormat)
 
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
-    parser = argparse.ArgumentParser(prog='eventeditor', description='An event editor for Breath of the Wild')
+    parser = argparse.ArgumentParser(prog='eventeditor', description=f'{APP_DISPLAY_NAME}: an event flow editor')
     parser.add_argument('event_flow_file', nargs='?', help='Event flow file to open')
     args, _ = parser.parse_known_args()
     app = q.QApplication(sys.argv)

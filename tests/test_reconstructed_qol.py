@@ -4,7 +4,13 @@ from pathlib import Path
 
 from evfl import EventFlow, Flowchart
 
-from eventeditor.__main__ import normalize_flow_save_path
+from eventeditor.__main__ import (
+    APP_DISPLAY_NAME,
+    GITHUB_REPOSITORY_SLUG,
+    GITHUB_REPOSITORY_URL,
+    build_about_html,
+    normalize_flow_save_path,
+)
 import eventeditor.actor_xml as actor_xml
 import eventeditor.container_xml as container_xml
 import eventeditor.entry_point_tree_xml as entry_point_tree_xml
@@ -14,6 +20,16 @@ import eventeditor.util as util
 
 
 class ReconstructedQoLTests(unittest.TestCase):
+    def test_public_identity_strings(self):
+        self.assertEqual(APP_DISPLAY_NAME, 'TOTK EventEditor')
+        self.assertEqual(GITHUB_REPOSITORY_SLUG, 'cargocult-mods/TOTK-event-editor')
+        self.assertEqual(GITHUB_REPOSITORY_URL, 'https://github.com/cargocult-mods/TOTK-event-editor')
+
+        about_html = build_about_html('1.4.1', 'abcdef0')
+        self.assertIn(APP_DISPLAY_NAME, about_html)
+        self.assertIn(GITHUB_REPOSITORY_SLUG, about_html)
+        self.assertIn(GITHUB_REPOSITORY_URL, about_html)
+
     def test_totk_suffix_helpers(self):
         self.assertEqual(
             normalize_flow_save_path('Demo', 'Compressed TotK flowchart .bfevfl.zs (*)'),
