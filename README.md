@@ -28,7 +28,7 @@ Install Python 3.6+ (**64 bit version**) and PyQt5, then run `pip install evente
 
 Tagged releases can include a prebuilt Windows zip. Download
 `TOTK-EventEditor_<version>-Windows.zip` from the GitHub release, extract it,
-and run `TOTK EventEditor.exe` from the extracted `TOTK EventEditor` folder.
+and run `TOTK EventEditor.exe` from the extracted files.
 
 Maintainers can create that zip from GitHub Actions by pushing a version tag:
 
