@@ -1,10 +1,17 @@
 import argparse
 import io
 import os
+import sys
+
+# Configure environment variables to force hardware accelerated ANGLE (Direct3D 11) for QWebEngine.
+# This prevents the slow CPU-bound frame buffer copy on Windows.
+os.environ["QT_OPENGL"] = "angle"
+os.environ["QT_ANGLE_PLATFORM"] = "d3d11"
+os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--ignore-gpu-blocklist --enable-gpu-rasterization --enable-oop-rasterization --enable-zero-copy"
+
 from pathlib import Path
 import re
 import signal
-import sys
 import traceback
 import typing
 
@@ -2035,6 +2042,16 @@ def main() -> None:
     parser.add_argument('--entry-point', default='', help='Entry point to select after opening the event flow file')
     parser.add_argument('event_flow_file', nargs='?', help='Event flow file to open')
     args, _ = parser.parse_known_args()
+    qc.QCoreApplication.setAttribute(qc.Qt.AA_ShareOpenGLContexts, True)
+    qc.QCoreApplication.setAttribute(qc.Qt.AA_UseDesktopOpenGL, True)
+    qc.QCoreApplication.setAttribute(qc.Qt.AA_UseOpenGLES, False)
+    qc.QCoreApplication.setAttribute(qc.Qt.AA_UseSoftwareOpenGL, False)
+    sys.argv.extend([
+        '--ignore-gpu-blocklist',
+        '--enable-gpu-rasterization',
+        '--enable-oop-rasterization',
+        '--enable-zero-copy',
+    ])
     app = q.QApplication(sys.argv)
     icon_path = util.get_icon_path()
     if icon_path:

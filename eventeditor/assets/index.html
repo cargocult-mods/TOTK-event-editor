@@ -4,17 +4,14 @@
   <meta charset="utf-8">
   <title>EventEditor Flowchart</title>
   <link rel="stylesheet" href="main.css">
-  <link rel="stylesheet" href="lib/node_modules/d3-context-menu/css/d3-context-menu.css">
   <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
 </head>
 <body>
-  <svg id="graph">
-    <g/>
-  </svg>
-  <script src="lib/d3.v3.min.js"></script>
-  <script src="lib/graphlib.min.js"></script>
-  <script src="lib/dagre-d3.js"></script>
-  <script src="lib/node_modules/d3-context-menu/js/d3-context-menu.js"></script>
+  <div id="graph"></div>
+  <script src="lib/cytoscape.min.js"></script>
+  <script src="lib/dagre.min.js"></script>
+  <script src="lib/cytoscape-dagre.js"></script>
+  <script src="context-menu.js"></script>
   <script src="main.js"></script>
 </body>
 </html>

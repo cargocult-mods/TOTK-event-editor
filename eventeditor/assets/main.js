@@ -1,5 +1,25 @@
+// ============================================================
+//  main.js — Cytoscape-based rewrite
+//  Replaces: d3 v3, dagre-d3, graphlib (separate instance)
+//  Requires: cytoscape.min.js, dagre.min.js, cytoscape-dagre.js,
+//            context-menu.js (vanilla replacement)
+// ============================================================
+
+// ── Global state (unchanged names/semantics) ─────────────────
+const SHOW_PROFILER = true; // Set to false to disable the performance profiler HUD
 let graph;
 let widget;
+let cpuTimeHistory = [];
+let fpsContainer = null;
+let lastFrameTime = performance.now();
+let frameCount = 0;
+let lastFpsUpdate = performance.now();
+let currentFps = 60;
+let lastLayoutTime = 0;
+let lastUpdateTime = 0;
+let lastUpdatePath = 'None';
+let minFps = 1000;
+let maxFps = 0;
 let eventNamesVisible = false;
 let eventParamVisible = false;
 let eventMessagesVisible = false;
@@ -50,11 +70,13 @@ const MESSAGE_TAG_COLOR_PALETTE = [
 
 const WHITELISTED_PARAMS = new Set(['MessageId', 'ASName']);
 
+// ── Utility helpers (unchanged) ───────────────────────────────
+
 function isMultiSelectEvent(event) {
   return !!(event && (event.ctrlKey || event.metaKey));
 }
 
-function formatNodeParamValue(value, key=null) {
+function formatNodeParamValue(value, key = null) {
   if (typeof key === 'string' && /^ChoiceLabel\d+$/i.test(key)) {
     if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
       return Math.trunc(value).toString().padStart(4, '0');
@@ -158,7 +180,7 @@ function messageTokenVisibleText(token) {
   return renderMessageTagsAsStyling ? formatMessageTagPreview(tag) : token;
 }
 
-function wrapLabelText(text, maxLength=LABEL_WRAP_LENGTH) {
+function wrapLabelText(text, maxLength = LABEL_WRAP_LENGTH) {
   const normalized = `${text}`.replace(/\r\n/g, '\n');
   const wrappedLines = [];
   for (const sourceLine of normalized.split('\n')) {
@@ -264,6 +286,45 @@ function getNodeLayoutLabel(label) {
   return `${label}`.split('\n').map((line) => messageLineLayoutText(line)).join('\n');
 }
 
+function computeNodeDimensions(label) {
+  const visibleLabel = `${getNodeLayoutLabel(label)}`.replace(/\r\n/g, '\n');
+  const lines = visibleLabel ? visibleLabel.split('\n') : [''];
+  const maxLineLength = lines.reduce((max, line) => Math.max(max, line.length), 0);
+  const lineCount = Math.max(1, lines.length);
+
+  const width = Math.min(420, Math.max(60, 12 + maxLineLength * 6.8 + Math.max(0, lineCount - 1) * 8));
+  const height = Math.min(180, Math.max(28, 18 + lineCount * 14));
+
+  return {
+    width: Math.round(width),
+    height: Math.round(height),
+  };
+}
+
+function getNodePosition(entry) {
+  const directPosition = entry && entry.position && Number.isFinite(entry.position.x) && Number.isFinite(entry.position.y)
+    ? { x: entry.position.x, y: entry.position.y }
+    : null;
+  if (directPosition) {
+    return directPosition;
+  }
+
+  const dataPosition = entry && entry.data && entry.data.position && Number.isFinite(entry.data.position.x) && Number.isFinite(entry.data.position.y)
+    ? { x: entry.data.position.x, y: entry.data.position.y }
+    : null;
+  if (dataPosition) {
+    return dataPosition;
+  }
+
+  const fallbackX = entry && entry.data && Number.isFinite(entry.data.x) ? entry.data.x : null;
+  const fallbackY = entry && entry.data && Number.isFinite(entry.data.y) ? entry.data.y : null;
+  return fallbackX != null && fallbackY != null ? { x: fallbackX, y: fallbackY } : null;
+}
+
+function hasStoredNodePositions(elements) {
+  return elements.some((el) => el.group === 'nodes' && el.position && Number.isFinite(el.position.x) && Number.isFinite(el.position.y));
+}
+
 function lineHasPageBreakTag(line) {
   return `${line}`.split(MESSAGE_TAG_REGEX)
     .some((part) => isMessagePageBreakTagToken(part));
@@ -310,7 +371,7 @@ function appendWrappedLabelLine(label, prefix, text) {
   return nextLabel;
 }
 
-function appendWrappedLabelLineWithIndent(label, prefix, text, continuationPrefix='  ') {
+function appendWrappedLabelLineWithIndent(label, prefix, text, continuationPrefix = '  ') {
   const wrapped = wrapLabelText(text);
   if (!wrapped.length) {
     return `${label}\n${prefix}`;
@@ -548,30 +609,7 @@ function mutateMessageTextStyleForTag(tag, currentStyle) {
   return markerStyle;
 }
 
-function getElementCenterInViewport(element) {
-  if (!element || !element.node()) {
-    return null;
-  }
-  const rect = element.node().getBoundingClientRect();
-  return {
-    x: rect.left + (rect.width / 2),
-    y: rect.top + (rect.height / 2),
-  };
-}
-
-function rerenderAroundCurrentNode(preferredNodeId) {
-  const currentViewport = graph.renderer.getViewport();
-  const targetNodeId = preferredNodeId != null ? preferredNodeId : graph.renderer.getSelection();
-  graph.refresh();
-  graph.render(0);
-  setTimeout(() => {
-    if (targetNodeId != null && targetNodeId !== -1 && graph.renderer.getElement(targetNodeId)) {
-      graph.renderer.scrollTo(targetNodeId, true, 0);
-    } else {
-      graph.renderer.restoreViewport(currentViewport);
-    }
-  }, 20);
-}
+// ── Node label building (unchanged) ──────────────────────────
 
 function getMessageText(node) {
   if (!node || !node.data || typeof node.data._message_text !== 'string') {
@@ -636,18 +674,23 @@ function getNodeLabel(node) {
   return label;
 }
 
+// ── Context menu action builders (unchanged logic) ────────────
+
 function handleNodeContextMenu(id) {
   const actions = [];
   const selectedNodeIds = graph.renderer.getSelectedIds();
   const selectedCount = selectedNodeIds.length;
 
   const idx = parseInt(id, 10);
-  const node = graph.g.node(id);
-  const prevNodes = [...(new Set(graph.g.inEdges(id).filter(e => !graph.g.edge(e).virtual).map(e => parseInt(e.v, 10))))];
-  const nextNodes = [...(new Set(graph.g.outEdges(id).filter(e => !graph.g.edge(e).virtual).map(e => parseInt(e.w, 10))))];
-  const classes = node.class.split(' ');
+  const nodeData = graph.getNodeData(id);
+  const nodeClass = nodeData ? (nodeData.node_type || '') : '';
+  const classes = nodeClass.split(' ');
 
-  const addAction = (name, fn) => actions.push({ title: name, action: () => { setTimeout(fn, 60) } });
+  // Build prev/next from the stored edge list on the graph
+  const prevNodes = graph.getPrevNodes(id);
+  const nextNodes = graph.getNextNodes(id);
+
+  const addAction = (name, fn) => actions.push({ title: name, action: () => { setTimeout(fn, 60); } });
   const clearSelectionForDelete = () => {
     graph.renderer.clearSelectionWithoutEmittingSignal();
     widget.emitEventSelectedSignal(-1);
@@ -709,9 +752,9 @@ function handleNodeContextMenu(id) {
       }
 
       const oneBranchSwitchOrFork =
-          nextNodes.length <= 1 && (classes.includes('fork') || classes.includes('switch'));
+        nextNodes.length <= 1 && (classes.includes('fork') || classes.includes('switch'));
       const isOnlyEventInEntry =
-          nextNodes.length === 0 && prevNodes.length === 1 && parseInt(prevNodes[0], 10) <= -1000;
+        nextNodes.length === 0 && prevNodes.length === 1 && parseInt(prevNodes[0], 10) <= -1000;
 
       if (!isOnlyEventInEntry && (classes.includes('action') || classes.includes('sub_flow') || oneBranchSwitchOrFork)) {
         actions.push({ divider: true });
@@ -750,7 +793,7 @@ function handleBackgroundContextMenu() {
   const actions = [];
   const selectedNodeIds = graph.renderer.getSelectedIds();
   const selectedCount = selectedNodeIds.length;
-  const addAction = (name, fn) => actions.push({ title: name, action: () => { setTimeout(fn, 60) } });
+  const addAction = (name, fn) => actions.push({ title: name, action: () => { setTimeout(fn, 60); } });
   const clearSelectionForDelete = () => {
     graph.renderer.clearSelectionWithoutEmittingSignal();
     widget.emitEventSelectedSignal(-1);
@@ -781,196 +824,454 @@ function handleBackgroundContextMenu() {
   return actions;
 }
 
-function clampContextMenuToViewport() {
-  const menuNode = d3.select('.d3-context-menu').node();
-  if (!menuNode) {
-    return;
-  }
-  const rect = menuNode.getBoundingClientRect();
-  const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
-  const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
-  const left = Math.max(8, Math.min(rect.left, maxLeft));
-  const top = Math.max(8, Math.min(rect.top, maxTop));
-  d3.select('.d3-context-menu')
-    .style('left', `${left}px`)
-    .style('top', `${top}px`);
+// ── Cytoscape stylesheet ─────────────────────────────────────
+//
+// Node types: entry, action, switch, fork, join, sub_flow
+// Selection and search-match states are applied as extra classes.
+
+function buildCytoscapeStylesheet(isDark) {
+  const bg = isDark ? '#3c3f41' : '#f5f5f5';
+  const defaultNodeBg = isDark ? '#4a525e' : '#ffffff';
+  const defaultNodeBorder = isDark ? '#7a8694' : '#888888';
+  const labelColor = isDark ? '#f0f0f0' : '#222222';
+  const edgeColor = isDark ? '#8a9ab0' : '#555555';
+  const virtualEdgeColor = isDark ? '#5a6472' : '#aaaaaa';
+  const edgeLabelBg = isDark ? '#3c3f41' : '#f5f5f5';
+  const edgeLabelColor = isDark ? '#c0c8d4' : '#333333';
+
+  return [
+    {
+      selector: 'core',
+      style: {
+        'active-bg-color': bg,
+        'active-bg-opacity': 0,
+        'selection-box-color': isDark ? '#2a82da' : '#1a73e8',
+        'selection-box-opacity': 0.15,
+        'selection-box-border-color': isDark ? '#2a82da' : '#1a73e8',
+        'selection-box-border-width': 1,
+      },
+    },
+    {
+      selector: 'node',
+      style: {
+        'shape': 'round-rectangle',
+        'background-color': defaultNodeBg,
+        'border-color': defaultNodeBorder,
+        'border-width': 1.5,
+        'label': 'data(label)',
+        'text-valign': 'center',
+        'text-halign': 'center',
+        'text-wrap': 'wrap',
+        'font-family': 'Consolas, Menlo, Monaco, "Courier New", monospace',
+        'font-size': '11px',
+        'color': labelColor,
+        'padding': '8px',
+        'width': (ele) => ele.data('nodeWidth') || 60,
+        'height': (ele) => ele.data('nodeHeight') || 28,
+        'min-width': '60px',
+        'min-height': '28px',
+        'text-max-width': '320px',
+        'overlay-opacity': 0,
+      },
+    },
+    // Entry point nodes (id < -1000) — rounded pill style
+    {
+      selector: 'node.entry',
+      style: {
+        'background-color': isDark ? '#2d4a2d' : '#e6f4ea',
+        'border-color': isDark ? '#4caf50' : '#34a853',
+        'border-width': 2,
+        'shape': 'round-rectangle',
+        'font-weight': 'bold',
+      },
+    },
+    // Action nodes
+    {
+      selector: 'node.action',
+      style: {
+        'background-color': isDark ? '#2a3a50' : '#e8f0fe',
+        'border-color': isDark ? '#5588cc' : '#4285f4',
+      },
+    },
+    // Switch nodes (query/condition)
+    {
+      selector: 'node.switch',
+      style: {
+        'background-color': isDark ? '#3a3020' : '#fef7e0',
+        'border-color': isDark ? '#c8962a' : '#f9ab00',
+        'shape': 'diamond',
+      },
+    },
+    // Fork nodes
+    {
+      selector: 'node.fork',
+      style: {
+        'background-color': isDark ? '#3a2040' : '#fce8fd',
+        'border-color': isDark ? '#a050b8' : '#9334e6',
+        'shape': 'hexagon',
+      },
+    },
+    // Join nodes
+    {
+      selector: 'node.join',
+      style: {
+        'background-color': isDark ? '#3a2040' : '#fce8fd',
+        'border-color': isDark ? '#a050b8' : '#9334e6',
+        'shape': 'hexagon',
+      },
+    },
+    // Sub-flow nodes
+    {
+      selector: 'node.sub_flow',
+      style: {
+        'background-color': isDark ? '#3a2828' : '#fdecea',
+        'border-color': isDark ? '#c04040' : '#d93025',
+        'shape': 'round-rectangle',
+        'border-style': 'double',
+      },
+    },
+    // Selected state
+    {
+      selector: 'node.selected',
+      style: {
+        'border-color': isDark ? '#5aaaff' : '#1a73e8',
+        'border-width': 3,
+        'background-color': isDark ? '#1e3a5f' : '#d2e3fc',
+      },
+    },
+    // Search match
+    {
+      selector: 'node.search-match',
+      style: {
+        'border-color': '#f9ab00',
+        'border-width': 3,
+        'background-color': isDark ? '#3a3010' : '#fff8e1',
+      },
+    },
+    // Current search result (overrides search-match)
+    {
+      selector: 'node.search-current',
+      style: {
+        'border-color': '#ea4335',
+        'border-width': 3.5,
+        'background-color': isDark ? '#3a1010' : '#fde8e8',
+      },
+    },
+    // Edges
+    {
+      selector: 'edge',
+      style: {
+        'width': 1.5,
+        'line-color': edgeColor,
+        'target-arrow-color': edgeColor,
+        'target-arrow-shape': 'triangle',
+        'curve-style': 'bezier',
+        'label': 'data(label)',
+        'font-size': '10px',
+        'color': edgeLabelColor,
+        'text-background-color': edgeLabelBg,
+        'text-background-opacity': 1,
+        'text-background-padding': '2px',
+        'text-border-width': 0,
+        'overlay-opacity': 0,
+        'arrow-scale': 1,
+      },
+    },
+    {
+      selector: 'edge.virtual',
+      style: {
+        'line-color': virtualEdgeColor,
+        'target-arrow-color': virtualEdgeColor,
+        'line-style': 'dashed',
+        'width': 1,
+        'label': '',
+      },
+    },
+    // Highlighted edges for selected node
+    {
+      selector: 'edge.selected-in-edge',
+      style: {
+        'line-color': isDark ? '#4db6ff' : '#1a73e8',
+        'target-arrow-color': isDark ? '#4db6ff' : '#1a73e8',
+        'width': 2.5,
+      },
+    },
+    {
+      selector: 'edge.selected-out-edge',
+      style: {
+        'line-color': isDark ? '#ff9e64' : '#e65c00',
+        'target-arrow-color': isDark ? '#ff9e64' : '#e65c00',
+        'width': 2.5,
+      },
+    },
+  ];
 }
+
+// ── Renderer (Cytoscape wrapper) ─────────────────────────────
 
 class Renderer {
   constructor() {
-    this.svg = d3.select('svg');
-    this.svgGroup = d3.select('svg g');
+    this.cy = null;
     this.selectedNodeIds = new Set();
     this.primarySelectedId = null;
-
     this.nodeWhitelist = null;
+    this._panZoomStartTime = null;
+  }
 
-    this.zoom = d3.behavior.zoom();
-    this.lastZoomEventStart = null;
-    this.svg.call(this.zoom.on('zoom', () => this.updateTransform()));
-    this.svg.call(this.zoom.on('zoomstart', () => this.lastZoomEventStart = new Date()));
+  // ── Init / stylesheet ───────────────────────────────────────
 
-    // Reset selection on click.
-    // Unfortunately we need to do some extra work to determine whether the click event is caused
-    // by zooming or is a simple click.
-    this.svg.on('click', () => {
-      // The zoom lasted more than 100 ms, so it's likely a zoom.
-      if ((new Date() - this.lastZoomEventStart) >= 100) {
-        return;
-      }
-      this.clearSelection();
+  _initCy() {
+    const isDark = document.body.classList.contains('dark-mode');
+    this.cy = cytoscape({
+      container: document.getElementById('graph'),
+      elements: [],
+      style: buildCytoscapeStylesheet(isDark),
+      layout: { name: 'preset' },
+      minZoom: 0.05,
+      maxZoom: 4,
+      wheelSensitivity: 1,
+      // Use the native canvas renderer for performance
+      renderer: { name: 'canvas' },
     });
-    this.svg.on('contextmenu', () => {
-      if (this._isTargetInsideNode(d3.event.target)) {
+
+    // Register dagre layout
+    // cytoscape-dagre is already loaded as a side-effect script
+
+    this._bindEvents();
+  }
+
+  refreshStylesheet() {
+    if (!this.cy) return;
+    const isDark = document.body.classList.contains('dark-mode');
+    this.cy.style(buildCytoscapeStylesheet(isDark));
+  }
+
+  // ── Event binding ───────────────────────────────────────────
+
+  _bindEvents() {
+    const cy = this.cy;
+
+    // Pan/zoom start (for distinguishing click vs drag)
+    cy.on('viewport', () => {
+      this._panZoomStartTime = performance.now();
+    });
+
+    // Background click — clear selection
+    cy.on('tap', (event) => {
+      if (event.target === cy) {
+        // Only clear if not a pan (panning also fires tap on background)
+        if (this._panZoomStartTime == null || (performance.now() - this._panZoomStartTime) < 150) {
+          this.clearSelection();
+        }
+      }
+    });
+
+    // Background right-click
+    cy.on('cxttap', (event) => {
+      if (event.target === cy) {
+        const actions = handleBackgroundContextMenu();
+        showContextMenu(actions, event.originalEvent.clientX, event.originalEvent.clientY);
+      }
+    });
+
+    // Node click (select / multi-select)
+    cy.on('tap', 'node', (event) => {
+      const id = event.target.id();
+      if (isMultiSelectEvent(event.originalEvent)) {
+        this.toggleSelection(id);
+      } else {
+        this.select(id);
+      }
+      event.stopPropagation();
+    });
+
+    // Node double-click
+    cy.on('dbltap', 'node', (event) => {
+      if (actionsProhibited) {
+        event.stopPropagation();
         return;
       }
-      d3.contextMenu(handleBackgroundContextMenu).call(this.svg.node());
-      clampContextMenuToViewport();
+      const id = event.target.id();
+      const nodeData = graph.getNodeData(id);
+      const nodeType = nodeData ? nodeData.node_type : '';
+      const numericId = parseInt(id, 10);
+      if (nodeType === 'entry') {
+        widget.renameEntryPoint(numericId);
+      } else if (nodeType === 'fork') {
+        widget.editForkBranches(numericId);
+      } else {
+        widget.editEvent(numericId);
+      }
+      event.stopPropagation();
+    });
+
+    // Node right-click
+    cy.on('cxttap', 'node', (event) => {
+      const id = event.target.id();
+      this.selectForContextMenu(id);
+      const actions = handleNodeContextMenu(id);
+      showContextMenu(actions, event.originalEvent.clientX, event.originalEvent.clientY);
+      event.stopPropagation();
+    });
+
+    // Viewport change → CPU profiling
+    cy.on('pan zoom', () => {
+      if (SHOW_PROFILER) {
+        const tStart = performance.now();
+        const tEnd = performance.now();
+        cpuTimeHistory.push(tEnd - tStart);
+      }
     });
   }
 
-  _restoreRawNodeLabels(visibleGraph) {
-    this.svgGroup.selectAll('.node').each(function(id) {
-      const node = visibleGraph.node(id);
-      const rawLabel = node && node.rawLabel;
-      if (typeof rawLabel !== 'string') {
-        return;
-      }
+  // ── Render ──────────────────────────────────────────────────
 
-      const rawLines = rawLabel.split('\n');
-      const tspans = this.querySelectorAll('.label text tspan');
-      if (rawLines.length !== tspans.length) {
-        return;
-      }
-      rawLines.forEach((line, index) => {
-        tspans[index].textContent = line;
-      });
-    });
-  }
-
-  _styleMessageTags() {
-    this.svgGroup.selectAll('.node .label text').each(function() {
-      const textNode = this;
-      const tspans = textNode.querySelectorAll('tspan');
-      const currentStyle = {};
-      tspans.forEach((lineTspan) => {
-        const line = lineTspan.textContent || '';
-        if (line === MESSAGE_BLANK_LINE || line === MESSAGE_BUBBLE_BREAK_LINE) {
-          lineTspan.textContent = MESSAGE_BLANK_LINE;
-          lineTspan.setAttribute('fill-opacity', '0');
-          lineTspan.setAttribute('class', line === MESSAGE_BUBBLE_BREAK_LINE ? 'message-bubble-break' : 'message-blank-line');
-          if (line === MESSAGE_BUBBLE_BREAK_LINE) {
-            lineTspan.setAttribute('font-size', '7px');
-          }
-          return;
-        }
-        if (!MESSAGE_TAG_REGEX.test(line)) {
-          MESSAGE_TAG_REGEX.lastIndex = 0;
-          if (renderMessageTagsAsStyling && hasSvgTextStyle(currentStyle)) {
-            applySvgTextStyle(lineTspan, currentStyle);
-          }
-          return;
-        }
-        MESSAGE_TAG_REGEX.lastIndex = 0;
-        const parts = line.split(MESSAGE_TAG_REGEX).filter((part) => part.length > 0);
-        while (lineTspan.firstChild) {
-          lineTspan.removeChild(lineTspan.firstChild);
-        }
-        for (const part of parts) {
-          const segment = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
-          if (/^\{\{[^{}\n]+\}\}$/.test(part)) {
-            const tag = parseMessageTag(part);
-            segment.textContent = isMessageTagHidden(tag) ? '' :
-              (renderMessageTagsAsStyling ? formatMessageTagPreview(tag) : part);
-            segment.setAttribute('class', `message-tag message-tag-${tag.name.replace(/[^A-Za-z0-9_-]/g, '-')}`);
-            const markerStyle = renderMessageTagsAsStyling
-              ? mutateMessageTextStyleForTag(tag, currentStyle)
-              : { fill: '#b8bcc4' };
-            applySvgTextStyle(segment, markerStyle);
-          } else {
-            segment.textContent = part;
-            if (renderMessageTagsAsStyling) {
-              applySvgTextStyle(segment, currentStyle);
-            }
-          }
-          if (segment.textContent) {
-            lineTspan.appendChild(segment);
-          }
-        }
-      });
-    });
-  }
-
-  _fitNodeBoxesToLabels() {
-    this.svgGroup.selectAll('.node').each(function() {
-      const shape = this.firstElementChild;
-      const label = this.querySelector('.label');
-      if (!shape || !label || shape.tagName.toLowerCase() !== 'rect') {
-        return;
-      }
-
-      let bbox;
-      try {
-        bbox = label.getBBox();
-      } catch (error) {
-        return;
-      }
-      if (!bbox || bbox.width <= 0 || bbox.height <= 0) {
-        return;
-      }
-
-      const padX = 10;
-      const padY = 8;
-      shape.setAttribute('x', `${Math.floor(bbox.x - padX)}`);
-      shape.setAttribute('y', `${Math.floor(bbox.y - padY)}`);
-      shape.setAttribute('width', `${Math.ceil(bbox.width + (padX * 2))}`);
-      shape.setAttribute('height', `${Math.ceil(bbox.height + (padY * 2))}`);
-    });
-  }
-
-  getSelection() {
-    const selectedIds = this.getSelectedIds();
-    if (!selectedIds.length) {
-      this.primarySelectedId = null;
-      return -1;
+  render(elements, transitionMs = GRAPH_TRANSITION_MS) {
+    if (!this.cy) {
+      this._initCy();
     }
 
-    if (this.primarySelectedId == null || !selectedIds.includes(parseInt(this.primarySelectedId, 10))) {
-      this.primarySelectedId = selectedIds[0];
-    }
-    return parseInt(this.primarySelectedId, 10);
+    // Filter by whitelist if set
+    const filteredElements = this.nodeWhitelist
+      ? elements.filter((el) => {
+          if (el.group === 'nodes') return this.nodeWhitelist.has(el.data.id);
+          if (el.group === 'edges') return this.nodeWhitelist.has(el.data.source) && this.nodeWhitelist.has(el.data.target);
+          return false;
+        })
+      : elements;
+
+    const cy = this.cy;
+    const useStoredPositions = hasStoredNodePositions(filteredElements);
+
+    cy.batch(() => {
+      cy.elements().remove();
+      cy.add(filteredElements);
+    });
+
+    const layout = cy.layout({
+      name: useStoredPositions ? 'preset' : 'dagre',
+      rankDir: 'TB',
+      nodeSep: 40,
+      edgeSep: 10,
+      rankSep: 60,
+      padding: 20,
+      animate: useStoredPositions ? false : transitionMs > 0,
+      animationDuration: transitionMs,
+      fit: false,
+    });
+
+    layout.run();
+
+    // Re-apply selection state
+    this._refreshSelectionAfterRender();
   }
 
-  getSelectedIds() {
-    const domIds = this._getSelectedIdsFromDom();
-    if (domIds.length || this.selectedNodeIds.size === 0) {
-      this.selectedNodeIds = new Set(domIds);
-      if (this.primarySelectedId != null && !this.selectedNodeIds.has(this.primarySelectedId)) {
-        this.primarySelectedId = domIds.length ? domIds[domIds.length - 1] : null;
-      }
-      return domIds;
-    }
+  fastUpdate(elements) {
+    // Fast path: only labels changed, no layout needed. Just update
+    // Cytoscape data and re-style without running dagre.
+    if (!this.cy) return;
+    const tStart = performance.now();
+    lastUpdatePath = 'Fast In-Place';
 
-    return [...this.selectedNodeIds]
-      .filter((id) => !Number.isNaN(id))
-      .sort((a, b) => a - b);
-  }
-
-  _getSelectedIdsFromDom() {
-    const selectedIds = [];
-    this.svgGroup.selectAll('.node.selected').each(function(id) {
-      let numericId = parseInt(id, 10);
-      if (Number.isNaN(numericId)) {
-        const elementId = d3.select(this).attr('id');
-        if (elementId && elementId.startsWith('n')) {
-          numericId = parseInt(elementId.substring(1), 10);
+    this.cy.batch(() => {
+      for (const el of elements) {
+        if (el.group !== 'nodes') continue;
+        const cyNode = this.cy.getElementById(el.data.id);
+        if (cyNode && cyNode.length) {
+          cyNode.data('label', el.data.label);
+          cyNode.data('rawLabel', el.data.rawLabel);
         }
       }
-      if (!Number.isNaN(numericId)) {
-        selectedIds.push(numericId);
+    });
+
+    applySearchHighlights();
+    this._refreshSelectionAfterRender();
+
+    const tEnd = performance.now();
+    lastUpdateTime = tEnd - tStart;
+    lastLayoutTime = 0;
+  }
+
+  _refreshSelectionAfterRender() {
+    if (!this.cy) return;
+    this.cy.batch(() => {
+      this.cy.nodes().removeClass('selected');
+      for (const id of this.selectedNodeIds) {
+        const el = this.cy.getElementById(`${id}`);
+        if (el && el.length) el.addClass('selected');
       }
     });
-    return [...new Set(selectedIds)].sort((a, b) => a - b);
+    this._updateEdgeHighlights();
+  }
+
+  // ── Selection ───────────────────────────────────────────────
+
+  select(id, emitSignal = true) {
+    if (!this.cy) return;
+    const numericId = parseInt(id, 10);
+    this.clearSelectionWithoutEmittingSignal();
+    const el = this.cy.getElementById(`${id}`);
+    if (el && el.length) el.addClass('selected');
+    this.selectedNodeIds.add(numericId);
+    this.primarySelectedId = numericId;
+    this._updateEdgeHighlights();
+    if (emitSignal) {
+      widget.emitEventSelectedSignal(numericId);
+      widget.emitSelectedNodeIdsSignal(this.getSelectedIds());
+    }
+  }
+
+  toggleSelection(id) {
+    if (!this.cy) return;
+    const numericId = parseInt(id, 10);
+    const el = this.cy.getElementById(`${id}`);
+    if (!el || !el.length) return;
+
+    if (this.selectedNodeIds.has(numericId)) {
+      el.removeClass('selected');
+      this.selectedNodeIds.delete(numericId);
+      if (this.primarySelectedId === numericId) {
+        this.primarySelectedId = this.selectedNodeIds.size
+          ? [...this.selectedNodeIds][0]
+          : null;
+      }
+    } else {
+      el.addClass('selected');
+      this.selectedNodeIds.add(numericId);
+      this.primarySelectedId = numericId;
+    }
+
+    this._updateEdgeHighlights();
+    widget.emitEventSelectedSignal(this.getSelection());
+    widget.emitSelectedNodeIdsSignal(this.getSelectedIds());
+  }
+
+  selectForContextMenu(id) {
+    const numericId = parseInt(id, 10);
+    const isSelected = this.selectedNodeIds.has(numericId);
+    if (!isSelected) {
+      this.select(id);
+      return;
+    }
+    this.selectedNodeIds.add(numericId);
+    this.primarySelectedId = numericId;
+    this._updateEdgeHighlights();
+    widget.emitEventSelectedSignal(numericId);
+    widget.emitSelectedNodeIdsSignal(this.getSelectedIds());
+  }
+
+  selectMany(ids) {
+    if (!this.cy) return;
+    this.clearSelectionWithoutEmittingSignal();
+    for (const id of ids) {
+      const el = this.cy.getElementById(`${id}`);
+      if (el && el.length) el.addClass('selected');
+      this.selectedNodeIds.add(parseInt(id, 10));
+    }
+    this.primarySelectedId = ids.length ? parseInt(ids[0], 10) : null;
+    this._updateEdgeHighlights();
+    widget.emitEventSelectedSignal(this.getSelection());
+    widget.emitSelectedNodeIdsSignal(this.getSelectedIds());
   }
 
   clearSelection() {
@@ -980,387 +1281,283 @@ class Renderer {
   }
 
   clearSelectionWithoutEmittingSignal() {
-    const selectedIds = this.getSelectedIds();
-    for (const cl of ['selected', 'selected-in-edge', 'selected-out-edge', 'selected-in-edge-label', 'selected-out-edge-label']) {
-      d3.selectAll('.' + cl).classed(cl, false);
+    if (this.cy) {
+      this.cy.nodes().removeClass('selected');
+      this._clearEdgeHighlights();
     }
     this.selectedNodeIds.clear();
     this.primarySelectedId = null;
-    if (!graph.g) {
-      return;
-    }
-    for (const nodeId of selectedIds) {
-      this._updateNodeSelectionClass(nodeId, graph.g, false);
-    }
   }
 
-  _isTargetInsideNode(target) {
-    while (target) {
-      if (target.classList && target.classList.contains('node')) {
-        return true;
-      }
-      if (target === this.svg.node()) {
-        break;
-      }
-      target = target.parentNode;
+  getSelection() {
+    const ids = this.getSelectedIds();
+    if (!ids.length) {
+      this.primarySelectedId = null;
+      return -1;
     }
-    return false;
+    if (this.primarySelectedId == null || !ids.includes(parseInt(this.primarySelectedId, 10))) {
+      this.primarySelectedId = ids[0];
+    }
+    return parseInt(this.primarySelectedId, 10);
   }
 
-  _resolveNodeId(g, id) {
-    if (!g) {
-      return id;
-    }
-    if (g.node(id)) {
-      return id;
-    }
-    const numericId = parseInt(id, 10);
-    if (!Number.isNaN(numericId) && g.node(numericId)) {
-      return numericId;
-    }
-    const stringId = `${id}`;
-    if (g.node(stringId)) {
-      return stringId;
-    }
-    return id;
+  getSelectedIds() {
+    return [...this.selectedNodeIds]
+      .filter((id) => !Number.isNaN(id))
+      .sort((a, b) => a - b);
   }
 
-  _updateNodeSelectionClass(id, g, selected) {
-    const resolvedId = this._resolveNodeId(g, id);
-    const node = g.node(resolvedId);
-    if (!node) {
-      return;
-    }
-    const cleanedClass = node.class.replace(/\bselected\b/g, '').replace(/\s+/g, ' ').trim();
-    node.class = selected ? `${cleanedClass} selected`.trim() : cleanedClass;
-    d3.select(`#n${resolvedId}`).classed('selected', selected);
+  // ── Edge highlight helpers ──────────────────────────────────
+
+  _clearEdgeHighlights() {
+    if (!this.cy) return;
+    this.cy.edges().removeClass('selected-in-edge selected-out-edge');
   }
 
-  _updateEdgeHighlights(g) {
-    for (const cl of ['selected-in-edge', 'selected-out-edge', 'selected-in-edge-label', 'selected-out-edge-label']) {
-      d3.selectAll('.' + cl).classed(cl, false);
-    }
-
-    if (this.primarySelectedId == null) {
-      return;
-    }
-
-    const id = this._resolveNodeId(g, this.primarySelectedId);
-    if (!g.node(id)) {
+  _updateEdgeHighlights() {
+    this._clearEdgeHighlights();
+    if (this.primarySelectedId == null || !this.cy) return;
+    const node = this.cy.getElementById(`${this.primarySelectedId}`);
+    if (!node || !node.length) {
       this.primarySelectedId = null;
       return;
     }
-
-    g.inEdges(id).forEach((e) => {
-      d3.selectAll(`.edge-${e.v}-${e.w}`).classed('selected-in-edge', true);
-      d3.select(`#label-${e.name}`).classed('selected-in-edge-label', true);
-    });
-    g.outEdges(id).forEach((e) => {
-      d3.selectAll(`.edge-${e.v}-${e.w}`).classed('selected-out-edge', true);
-      d3.select(`#label-${e.name}`).classed('selected-out-edge-label', true);
-    });
+    node.incomers('edge').addClass('selected-in-edge');
+    node.outgoers('edge').addClass('selected-out-edge');
   }
 
-  _refreshPrimarySelection(g) {
-    const selectedIds = this.getSelectedIds()
-      .filter((id) => !!g.node(this._resolveNodeId(g, id)));
-    this.selectedNodeIds = new Set(selectedIds);
-    if (!selectedIds.length) {
-      this.primarySelectedId = null;
-      this._updateEdgeHighlights(g);
-      return;
-    }
-
-    if (this.primarySelectedId == null || !selectedIds.includes(parseInt(this.primarySelectedId, 10))) {
-      this.primarySelectedId = selectedIds[0];
-    }
-    this._updateEdgeHighlights(g);
-  }
-
-  select(id, g, emitSignal=true) {
-    const resolvedId = this._resolveNodeId(g, id);
-    const numericId = parseInt(resolvedId, 10);
-    this.clearSelectionWithoutEmittingSignal();
-    this._updateNodeSelectionClass(resolvedId, g, true);
-    this.selectedNodeIds.add(numericId);
-    this.primarySelectedId = numericId;
-    this._updateEdgeHighlights(g);
-    if (emitSignal) {
-      widget.emitEventSelectedSignal(numericId);
-      widget.emitSelectedNodeIdsSignal(this.getSelectedIds());
-    }
-  }
-
-  toggleSelection(id, g) {
-    const resolvedId = this._resolveNodeId(g, id);
-    const numericId = parseInt(resolvedId, 10);
-    const element = this.getElement(resolvedId);
-    if (!element) {
-      return;
-    }
-
-    if (element.classed('selected')) {
-      this._updateNodeSelectionClass(resolvedId, g, false);
-      this.selectedNodeIds.delete(numericId);
-      if (this.primarySelectedId === numericId) {
-        this.primarySelectedId = null;
-      }
-    } else {
-      this._updateNodeSelectionClass(resolvedId, g, true);
-      this.selectedNodeIds.add(numericId);
-      this.primarySelectedId = numericId;
-    }
-
-    this.selectedNodeIds = new Set(this._getSelectedIdsFromDom());
-    this._refreshPrimarySelection(g);
-    widget.emitEventSelectedSignal(this.getSelection());
-    widget.emitSelectedNodeIdsSignal(this.getSelectedIds());
-  }
-
-  selectForContextMenu(id, g) {
-    const resolvedId = this._resolveNodeId(g, id);
-    const element = this.getElement(resolvedId);
-    const numericId = parseInt(resolvedId, 10);
-    const isSelected = !!element && (element.classed('selected') || this.selectedNodeIds.has(numericId));
-    if (!isSelected) {
-      this.select(id, g);
-      return;
-    }
-    this.selectedNodeIds = new Set(this.getSelectedIds());
-    this.selectedNodeIds.add(numericId);
-    this.primarySelectedId = numericId;
-    this._updateEdgeHighlights(g);
-    widget.emitEventSelectedSignal(numericId);
-    widget.emitSelectedNodeIdsSignal(this.getSelectedIds());
-  }
-
-  selectMany(ids, g) {
-    this.clearSelectionWithoutEmittingSignal();
-    for (const id of ids) {
-      this._updateNodeSelectionClass(id, g, true);
-      this.selectedNodeIds.add(parseInt(id, 10));
-    }
-    this.primarySelectedId = ids.length ? parseInt(ids[0], 10) : null;
-    this._refreshPrimarySelection(g);
-    widget.emitEventSelectedSignal(this.getSelection());
-    widget.emitSelectedNodeIdsSignal(this.getSelectedIds());
-  }
-
-  getElement(id) {
-    const element = d3.select(`#n${id}`);
-    return element.empty() ? null : element;
-  }
+  // ── Viewport / scroll ───────────────────────────────────────
 
   getViewport() {
+    if (!this.cy) return null;
     return {
-      translate: this.zoom.translate().slice(),
-      scale: this.zoom.scale(),
+      pan: { ...this.cy.pan() },
+      zoom: this.cy.zoom(),
     };
   }
 
   restoreViewport(viewport) {
-    if (!viewport) {
-      return;
-    }
-    this.zoom.scale(viewport.scale);
-    this.zoom.translate(viewport.translate.slice());
-    this.updateTransform();
+    if (!viewport || !this.cy) return;
+    this.cy.viewport({ zoom: viewport.zoom, pan: viewport.pan });
   }
 
   viewportCenterPoint() {
-    const svgNode = this.svg.node();
-    if (!svgNode) {
-      return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
-    }
-    const rect = svgNode.getBoundingClientRect();
-    return {
-      x: rect.left + (rect.width / 2),
-      y: rect.top + (rect.height / 2),
-    };
+    const el = document.getElementById('graph');
+    if (!el) return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    const rect = el.getBoundingClientRect();
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
   }
 
   closestNodeIdToViewportCenter() {
-    const viewportCenter = this.viewportCenterPoint();
+    if (!this.cy) return null;
+    const center = this.cy.extent();
+    const cx = center.x1 + (center.x2 - center.x1) / 2;
+    const cy2 = center.y1 + (center.y2 - center.y1) / 2;
     let closestId = null;
-    let closestDistance = Number.POSITIVE_INFINITY;
-    this.svgGroup.selectAll('.node').each(function(id) {
-      const rect = this.getBoundingClientRect();
-      if (!rect || rect.width <= 0 || rect.height <= 0) {
-        return;
-      }
-      const dx = (rect.left + (rect.width / 2)) - viewportCenter.x;
-      const dy = (rect.top + (rect.height / 2)) - viewportCenter.y;
-      const distance = (dx * dx) + (dy * dy);
-      if (distance < closestDistance) {
-        closestDistance = distance;
-        closestId = id;
+    let closestDist = Infinity;
+    this.cy.nodes().forEach((node) => {
+      const pos = node.position();
+      const dx = pos.x - cx;
+      const dy = pos.y - cy2;
+      const dist = dx * dx + dy * dy;
+      if (dist < closestDist) {
+        closestDist = dist;
+        closestId = node.id();
       }
     });
     return closestId == null ? null : parseInt(closestId, 10);
   }
 
-  isElementVisible(id, margin=40) {
-    const element = this.getElement(id);
-    if (!element) {
-      return false;
-    }
-    const rect = element.node().getBoundingClientRect();
-    return rect.right >= margin
-      && rect.bottom >= margin
-      && rect.left <= (window.innerWidth - margin)
-      && rect.top <= (window.innerHeight - margin);
+  getElement(id) {
+    if (!this.cy) return null;
+    const el = this.cy.getElementById(`${id}`);
+    return el && el.length ? el : null;
   }
 
-  scrollTo(id, center=false, duration=1000, targetScale=null) {
-    const element = this.getElement(id);
-    if (!element) {
-      return false;
-    }
-    const scale = targetScale == null ? this.zoom.scale() : targetScale;
-    this.svg.interrupt();
-    if (targetScale != null) {
-      this.zoom.scale(scale);
-    }
+  isElementVisible(id) {
+    const el = this.getElement(id);
+    if (!el) return false;
+    const bb = el.renderedBoundingBox();
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const margin = 40;
+    return bb.x2 >= margin && bb.y2 >= margin && bb.x1 <= w - margin && bb.y1 <= h - margin;
+  }
 
-    const svgNode = this.svg.node();
-    const elementNode = element.node();
-    if (!svgNode || !elementNode) {
-      return false;
+  scrollTo(id, center = false, duration = 1000, targetScale = null) {
+    if (!this.cy) return false;
+    const el = this.getElement(id);
+    if (!el) return false;
+
+    const pos = el.position();
+    const zoom = targetScale != null ? targetScale : this.cy.zoom();
+    const container = document.getElementById('graph');
+    const w = container ? container.clientWidth : window.innerWidth;
+    const h = container ? container.clientHeight : window.innerHeight;
+    const targetPan = {
+      x: w / 2 - pos.x * zoom,
+      y: center ? h / 2 - pos.y * zoom : 60 - pos.y * zoom,
+    };
+
+    if (duration > 0) {
+      this.cy.animate({ zoom, pan: targetPan }, { duration });
+    } else {
+      this.cy.viewport({ zoom, pan: targetPan });
     }
-
-    const nodeTransform = d3.transform(element.attr('transform'));
-    const [nodeX, nodeY] = nodeTransform.translate;
-    const bbox = elementNode.getBBox();
-    const graphCenterX = nodeX + bbox.x + (bbox.width / 2);
-    const graphCenterY = nodeY + bbox.y + (bbox.height / 2);
-    const targetX = svgNode.clientWidth / 2;
-    const targetY = center ? (svgNode.clientHeight / 2) : 60;
-    const nextTranslate = [
-      targetX - (graphCenterX * scale),
-      targetY - (graphCenterY * scale),
-    ];
-
-    this.svg.transition().duration(duration)
-      .call(this.zoom.translate(nextTranslate).event);
     return true;
   }
 
-  render(g, transitionMs=GRAPH_TRANSITION_MS) {
-    const visibleGraph = new graphlib.Graph({ multigraph: true });
-    visibleGraph.setGraph({});
-    visibleGraph.graph().transition = (selection) => {
-      if (!transitionMs) {
-        return selection;
-      }
-      return selection.transition().duration(transitionMs);
-    };
-
-    for (const v of g.nodes()) {
-      if (!this.nodeWhitelist || this.nodeWhitelist.has(v)) {
-        visibleGraph.setNode(v, g.node(v));
-      }
-    }
-    for (const e of g.edges()) {
-      if (!this.nodeWhitelist || this.nodeWhitelist.has(e.v)) {
-        visibleGraph.setEdge(e, g.edge(e));
-      }
-    }
-
-    const dagreRenderer = dagreD3.render();
-    this.svgGroup.selectAll('*').interrupt();
-    this.svgGroup.selectAll('*').remove();
-    this.svgGroup.call(dagreRenderer, visibleGraph);
-    this._restoreRawNodeLabels(visibleGraph);
-    this._styleMessageTags();
-    this._fitNodeBoxesToLabels();
-    this.svgGroup.selectAll('.node')
-      .on('click', (id) => {
-        if (isMultiSelectEvent(d3.event)) {
-          this.toggleSelection(id, g);
-        } else {
-          this.select(id, g);
-        }
-        d3.event.stopPropagation();
-      })
-      .on('dblclick', (id) => {
-        if (actionsProhibited) {
-          d3.event.stopPropagation();
-          return;
-        }
-
-        const node = g.node(id);
-        const classes = node.class.split(' ');
-        if (classes.includes('entry')) {
-          widget.renameEntryPoint(parseInt(id, 10));
-        } else if (classes.includes('fork')) {
-          widget.editForkBranches(parseInt(id, 10));
-        } else {
-          widget.editEvent(parseInt(id, 10));
-        }
-        d3.event.stopPropagation();
-      })
-      .on('contextmenu', (id) => {
-        this.selectForContextMenu(id, g);
-        d3.contextMenu(handleNodeContextMenu).call(this, id);
-        clampContextMenuToViewport();
-        d3.event.stopPropagation();
-      });
-    for (const id of this.getSelectedIds()) {
-      this._updateNodeSelectionClass(id, g, true);
-    }
-    this._refreshPrimarySelection(g);
+  setScale(scale) {
+    if (!this.cy) return;
+    this.cy.zoom(scale);
   }
 
-  setScale(scale) { this.zoom.scale(scale); this.updateTransform(); }
-  setTranslate(translate) { this.zoom.translate(translate); this.updateTransform(); }
+  setTranslate(pan) {
+    if (!this.cy) return;
+    // pan is [x, y] array (legacy API compat)
+    this.cy.pan({ x: pan[0], y: pan[1] });
+  }
 
-  updateTransform() {
-    this.svgGroup.attr('transform', `translate(${this.zoom.translate()})scale(${this.zoom.scale()})`);
+  // Expose zoom-scale for the keyboard handler and profiler
+  getZoom() {
+    return this.cy ? this.cy.zoom() : 1;
+  }
+
+  getPan() {
+    return this.cy ? this.cy.pan() : { x: 0, y: 0 };
   }
 }
 
+// ── Graph (data + layout coordinator) ───────────────────────
+
 class Graph {
   constructor() {
-    this.g = null;
     this.data = null;
+    this._elements = [];      // raw Cytoscape element descriptors built from data
+    this._nodeDataMap = {};   // id (string) → raw data entry
+    this._edgeList = [];      // { source, target, virtual } — for context menu queries
     this.renderer = new Renderer();
     this.persistentComponentRootName = null;
   }
 
+  // ── Data helpers for context menu ──────────────────────────
+
+  getNodeData(id) {
+    return this._nodeDataMap[`${id}`] || null;
+  }
+
+  getPrevNodes(id) {
+    return [...new Set(
+      this._edgeList
+        .filter((e) => `${e.target}` === `${id}` && !e.virtual)
+        .map((e) => parseInt(e.source, 10))
+    )];
+  }
+
+  getNextNodes(id) {
+    return [...new Set(
+      this._edgeList
+        .filter((e) => `${e.source}` === `${id}` && !e.virtual)
+        .map((e) => parseInt(e.target, 10))
+    )];
+  }
+
+  // Edge count for profiler (replaces g.edgeCount())
+  edgeCount() {
+    return this._edgeList.length;
+  }
+
+  // ── Build Cytoscape elements from data ──────────────────────
+
   update(data) {
     this.data = data;
-    this.g = new graphlib.Graph({ multigraph: true });
-    this.g.setGraph({});
+    this._nodeDataMap = {};
+    this._edgeList = [];
+    this._elements = [];
 
     for (const entry of data) {
       if (entry.type === 'node') {
+        this._nodeDataMap[`${entry.id}`] = entry;
         const rawLabel = getNodeLabel(entry);
-        this.g.setNode(entry.id, {
-          label: getNodeLayoutLabel(rawLabel),
-          rawLabel,
-          'class': entry.node_type,
-          id: `n${entry.id}`,
-          idx: entry.id,
-          name: entry.data.name,
-        });
+        const label = getNodeLayoutLabel(rawLabel);
+        const dimensions = computeNodeDimensions(label);
+        const position = getNodePosition(entry);
+        const nodeElement = {
+          group: 'nodes',
+          data: {
+            id: `${entry.id}`,
+            label,
+            rawLabel,
+            node_type: entry.node_type,
+            name: entry.data.name,
+            nodeWidth: dimensions.width,
+            nodeHeight: dimensions.height,
+          },
+          classes: entry.node_type,
+        };
+        if (position) {
+          nodeElement.position = position;
+        }
+        this._elements.push(nodeElement);
       } else if (entry.type === 'edge') {
-        this.g.setEdge(entry.source, entry.target, {
-          labelType: 'html',
-          label: `<span id="label-edge-${entry.source}-${entry.target}-${entry.data.value}">${entry.data.value == null ? '' : entry.data.value}</span>`,
-          'class': `edge-${entry.source}-${entry.target}`,
-          virtual: !!entry.data.virtual,
-        }, `edge-${entry.source}-${entry.target}-${entry.data.value}`);
+        const edgeId = `edge-${entry.source}-${entry.target}-${entry.data.value}`;
+        this._edgeList.push({ source: entry.source, target: entry.target, virtual: !!entry.data.virtual });
+        this._elements.push({
+          group: 'edges',
+          data: {
+            id: edgeId,
+            source: `${entry.source}`,
+            target: `${entry.target}`,
+            label: entry.data.value == null ? '' : `${entry.data.value}`,
+            virtual: !!entry.data.virtual,
+          },
+          classes: entry.data.virtual ? 'virtual' : '',
+        });
+      }
+    }
+  }
+
+  updateLabels(data) {
+    this.data = data;
+    // Build a Map of node id → element index for O(1) lookups (replaces O(n) .find() per entry)
+    const nodeElementMap = new Map();
+    for (let i = 0; i < this._elements.length; i++) {
+      const el = this._elements[i];
+      if (el.group === 'nodes') {
+        nodeElementMap.set(el.data.id, i);
+      }
+    }
+    for (const entry of data) {
+      if (entry.type === 'node') {
+        const rawLabel = getNodeLabel(entry);
+        const key = `${entry.id}`;
+        // Update element descriptor in place via Map lookup — O(1)
+        const idx = nodeElementMap.get(key);
+        if (idx !== undefined) {
+          const el = this._elements[idx];
+          const label = getNodeLayoutLabel(rawLabel);
+          const dimensions = computeNodeDimensions(label);
+          el.data.label = label;
+          el.data.rawLabel = rawLabel;
+          el.data.nodeWidth = dimensions.width;
+          el.data.nodeHeight = dimensions.height;
+        }
+        // Update node data map
+        this._nodeDataMap[key] = entry;
       }
     }
   }
 
   refresh() {
-    if (this.data && Object.keys(this.data).length > 0) {
+    if (this.data && this.data.length > 0) {
       this.update(this.data);
     }
   }
 
-  render(transitionMs=GRAPH_TRANSITION_MS) {
+  render(transitionMs = GRAPH_TRANSITION_MS) {
+    const tStart = performance.now();
+    lastUpdatePath = 'Full Layout';
+
     if (this.hasPersistentComponentFilter()) {
       const componentIds = this.findPersistentComponentIds();
       if (componentIds) {
@@ -1373,9 +1570,15 @@ class Graph {
       this.renderer.nodeWhitelist = null;
     }
 
-    this.renderer.render(this.g, transitionMs);
+    this.renderer.render(this._elements, transitionMs);
     refreshGraphSearch(false);
+
+    const tEnd = performance.now();
+    lastLayoutTime = tEnd - tStart;
+    lastUpdateTime = 0;
   }
+
+  // ── Component filter ─────────────────────────────────────────
 
   hasPersistentComponentFilter() {
     return !!this.persistentComponentRootName;
@@ -1386,33 +1589,38 @@ class Graph {
   }
 
   _findNodeIdByName(name) {
-    if (!this.g || name == null) {
-      return null;
-    }
-    for (const nodeId of this.g.nodes()) {
-      const node = this.g.node(nodeId);
-      if (node && node.name === name) {
-        return nodeId;
-      }
+    if (name == null) return null;
+    for (const [id, entry] of Object.entries(this._nodeDataMap)) {
+      if (entry && entry.data && entry.data.name === name) return id;
     }
     return null;
   }
 
   findNodeComponentIds(v) {
-    if (!this.g || v == null) {
-      return null;
+    // Use Cytoscape's built-in connected components via BFS.
+    if (!this.renderer.cy) return null;
+    const startNode = this.renderer.cy.getElementById(`${v}`);
+    if (!startNode || !startNode.length) return null;
+
+    // Collect all nodes in the same connected component (undirected).
+    const visited = new Set();
+    const queue = [startNode];
+    while (queue.length) {
+      const current = queue.pop();
+      const cid = current.id();
+      if (visited.has(cid)) continue;
+      visited.add(cid);
+      // Walk both incomers and outgoers (treat graph as undirected for component)
+      current.connectedEdges().connectedNodes().forEach((n) => {
+        if (!visited.has(n.id())) queue.push(n);
+      });
     }
-    const resolvedId = `${v}`;
-    const components = graphlib.alg.components(this.g);
-    const component = components.find((entry) => entry.includes(resolvedId));
-    return component ? new Set(component) : null;
+    return visited.size ? visited : null;
   }
 
   findPersistentComponentIds() {
     const rootId = this._findNodeIdByName(this.persistentComponentRootName);
-    if (rootId == null) {
-      return null;
-    }
+    if (rootId == null) return null;
     return this.findNodeComponentIds(rootId);
   }
 
@@ -1421,8 +1629,8 @@ class Graph {
     if (v == null) {
       this.clearPersistentComponentFilter();
     } else {
-      const node = this.g ? this.g.node(`${v}`) : null;
-      this.persistentComponentRootName = node ? node.name : null;
+      const nodeData = this.getNodeData(v);
+      this.persistentComponentRootName = nodeData && nodeData.data ? nodeData.data.name : null;
     }
     this.render();
     if (v != null && this.renderer.getElement(v)) {
@@ -1434,55 +1642,34 @@ class Graph {
 
   selectConnected(v) {
     const component = this.findNodeComponentIds(v);
-    if (!component) {
-      return;
-    }
+    if (!component) return;
     const ids = [...component]
       .map((nodeId) => parseInt(nodeId, 10))
       .filter((nodeId) => !Number.isNaN(nodeId) && nodeId >= 0);
-    this.renderer.selectMany(ids, this.g);
+    this.renderer.selectMany(ids);
   }
-
 }
 
 graph = new Graph();
 
+// ── Search (data-only — unchanged logic, Cytoscape API for highlights) ──
+
 function pushNodeParams(parts, node) {
-  if (!node || !node.data || !node.data.params) {
-    return;
-  }
-  try {
-    parts.push(JSON.stringify(node.data.params));
-  } catch (err) {
-    // Ignore non-serializable values.
-  }
+  if (!node || !node.data || !node.data.params) return;
+  try { parts.push(JSON.stringify(node.data.params)); } catch (err) {}
 }
 
 function pushNodeIdentity(parts, node) {
-  if (!node || !node.data) {
-    return;
-  }
-  if (node.data.name) {
-    parts.push(node.data.name);
-  }
-  if (node.data.actor) {
-    parts.push(node.data.actor);
-  }
-  if (node.data.action) {
-    parts.push(node.data.action);
-  }
-  if (node.data.query) {
-    parts.push(node.data.query);
-  }
+  if (!node || !node.data) return;
+  if (node.data.name)   parts.push(node.data.name);
+  if (node.data.actor)  parts.push(node.data.actor);
+  if (node.data.action) parts.push(node.data.action);
+  if (node.data.query)  parts.push(node.data.query);
 }
 
 function pushMalsText(parts, node) {
-  if (!node || !node.data) {
-    return;
-  }
-  if (node.data._message_text) {
-    parts.push(node.data._message_text);
-  }
+  if (!node || !node.data) return;
+  if (node.data._message_text) parts.push(node.data._message_text);
   if (node.data._choice_label_texts) {
     for (const value of Object.values(node.data._choice_label_texts)) {
       parts.push(value);
@@ -1490,100 +1677,62 @@ function pushMalsText(parts, node) {
   }
 }
 
-function getSearchableNodeText(node, scope='all') {
-  if (!node || !node.data) {
-    return '';
-  }
-
+function getSearchableNodeText(node, scope = 'all') {
+  if (!node || !node.data) return '';
   const parts = [];
-  if (scope === 'mals') {
-    pushMalsText(parts, node);
-    return parts.join('\n');
-  }
-  if (scope === 'params') {
-    pushNodeParams(parts, node);
-    return parts.join('\n');
-  }
-  if (scope === 'events') {
-    pushNodeIdentity(parts, node);
-    return parts.join('\n');
-  }
+  if (scope === 'mals') { pushMalsText(parts, node); return parts.join('\n'); }
+  if (scope === 'params') { pushNodeParams(parts, node); return parts.join('\n'); }
+  if (scope === 'events') { pushNodeIdentity(parts, node); return parts.join('\n'); }
   if (scope === 'switches') {
-    if (node.node_type !== 'switch') {
-      return '';
-    }
-    pushNodeIdentity(parts, node);
-    pushNodeParams(parts, node);
+    if (node.node_type !== 'switch') return '';
+    pushNodeIdentity(parts, node); pushNodeParams(parts, node);
     return parts.join('\n');
   }
   if (scope === 'subflows') {
-    if (node.node_type !== 'sub_flow') {
-      return '';
-    }
+    if (node.node_type !== 'sub_flow') return '';
     pushNodeIdentity(parts, node);
-    if (node.data.entry_point_name) {
-      parts.push(node.data.entry_point_name);
-    }
-    if (node.data.res_flowchart_name) {
-      parts.push(node.data.res_flowchart_name);
-    }
+    if (node.data.entry_point_name) parts.push(node.data.entry_point_name);
+    if (node.data.res_flowchart_name) parts.push(node.data.res_flowchart_name);
     pushNodeParams(parts, node);
     return parts.join('\n');
   }
-
   pushNodeIdentity(parts, node);
   pushNodeParams(parts, node);
   pushMalsText(parts, node);
-  if (node.data.entry_point_name) {
-    parts.push(node.data.entry_point_name);
-  }
-  if (node.data.res_flowchart_name) {
-    parts.push(node.data.res_flowchart_name);
-  }
+  if (node.data.entry_point_name) parts.push(node.data.entry_point_name);
+  if (node.data.res_flowchart_name) parts.push(node.data.res_flowchart_name);
   return parts.join('\n');
 }
 
 function clearSearchHighlightClasses() {
-  d3.selectAll('.node.search-match').classed('search-match', false);
-  d3.selectAll('.node.search-current').classed('search-current', false);
+  if (!graph || !graph.renderer.cy) return;
+  graph.renderer.cy.nodes().removeClass('search-match search-current');
 }
 
 function applySearchHighlights() {
   clearSearchHighlightClasses();
-  if (!graphSearchMatches.length || !graph || !graph.renderer) {
-    return;
-  }
+  if (!graphSearchMatches.length || !graph || !graph.renderer.cy) return;
 
   for (const nodeId of graphSearchMatches) {
-    const element = graph.renderer.getElement(nodeId);
-    if (element) {
-      element.classed('search-match', true);
-    }
+    const el = graph.renderer.getElement(nodeId);
+    if (el) el.addClass('search-match');
   }
 
   if (graphSearchIndex >= 0 && graphSearchIndex < graphSearchMatches.length) {
-    const currentElement = graph.renderer.getElement(graphSearchMatches[graphSearchIndex]);
-    if (currentElement) {
-      currentElement.classed('search-current', true);
-    }
+    const currentEl = graph.renderer.getElement(graphSearchMatches[graphSearchIndex]);
+    if (currentEl) currentEl.addClass('search-current');
   }
 }
 
 function emitSearchResults() {
-  if (!widget || !widget.emitSearchResultsSignal) {
-    return;
-  }
+  if (!widget || !widget.emitSearchResultsSignal) return;
   widget.emitSearchResultsSignal(graphSearchMatches.length, graphSearchIndex);
 }
 
-function scrollToCurrentSearchResult(duration=500) {
-  if (graphSearchIndex < 0 || graphSearchIndex >= graphSearchMatches.length) {
-    return;
-  }
+function scrollToCurrentSearchResult(duration = 500) {
+  if (graphSearchIndex < 0 || graphSearchIndex >= graphSearchMatches.length) return;
   const targetId = graphSearchMatches[graphSearchIndex];
-  if (graph && graph.g && graph.g.node(targetId)) {
-    graph.renderer.select(targetId, graph.g, false);
-  }
+  graph.renderer.select(targetId, false);
   graph.renderer.scrollTo(targetId, true, duration, 1);
 }
 
@@ -1606,9 +1755,7 @@ function refreshGraphSearch(scrollToResult) {
     .filter((entry) => entry.type === 'node')
     .filter((entry) => {
       const haystack = getSearchableNodeText(entry, graphSearchScope);
-      if (!haystack) {
-        return false;
-      }
+      if (!haystack) return false;
       const normalizedHaystack = graphSearchCaseInsensitive ? haystack.toLowerCase() : haystack;
       return normalizedHaystack.includes(normalizedNeedle);
     })
@@ -1631,39 +1778,36 @@ function refreshGraphSearch(scrollToResult) {
 
   applySearchHighlights();
   emitSearchResults();
-  if (scrollToResult) {
-    scrollToCurrentSearchResult();
-  }
+  if (scrollToResult) scrollToCurrentSearchResult();
 }
 
-window.eventEditorSetSearchQuery = function(query, caseInsensitive, scrollToResult, scope='all') {
+// ── Exported API (window.eventEditorSet* — unchanged names) ──
+
+window.eventEditorSetSearchQuery = function (query, caseInsensitive, scrollToResult, scope = 'all') {
   graphSearchQuery = (query || '').trim();
   graphSearchCaseInsensitive = !!caseInsensitive;
   graphSearchScope = ['all', 'mals', 'params', 'events', 'switches', 'subflows'].includes(scope) ? scope : 'all';
   refreshGraphSearch(!!scrollToResult);
 };
 
-window.eventEditorSetRenderMessageTagsAsStyling = function(enabled) {
+window.eventEditorSetRenderMessageTagsAsStyling = function (enabled) {
   renderMessageTagsAsStyling = !!enabled;
 };
 
-window.eventEditorSetShowNonTextMessageTags = function(visible) {
+window.eventEditorSetShowNonTextMessageTags = function (visible) {
   showNonTextMessageTags = !!visible;
 };
 
-window.eventEditorSetIncludeMessageBlankLines = function(include) {
+window.eventEditorSetIncludeMessageBlankLines = function (include) {
   includeMessageBlankLines = !!include;
 };
 
-window.eventEditorSetShowMessageBubbleBreaks = function(show) {
+window.eventEditorSetShowMessageBubbleBreaks = function (show) {
   showMessageBubbleBreaks = !!show;
 };
 
-window.eventEditorStepSearch = function(delta) {
-  if (!graphSearchMatches.length) {
-    emitSearchResults();
-    return;
-  }
+window.eventEditorStepSearch = function (delta) {
+  if (!graphSearchMatches.length) { emitSearchResults(); return; }
   const offset = delta < 0 ? -1 : 1;
   graphSearchIndex = (graphSearchIndex + offset + graphSearchMatches.length) % graphSearchMatches.length;
   applySearchHighlights();
@@ -1671,11 +1815,8 @@ window.eventEditorStepSearch = function(delta) {
   scrollToCurrentSearchResult(350);
 };
 
-window.eventEditorSetSearchIndex = function(index) {
-  if (!graphSearchMatches.length) {
-    emitSearchResults();
-    return;
-  }
+window.eventEditorSetSearchIndex = function (index) {
+  if (!graphSearchMatches.length) { emitSearchResults(); return; }
   const clampedIndex = Math.max(0, Math.min(graphSearchMatches.length - 1, parseInt(index, 10) || 0));
   graphSearchIndex = clampedIndex;
   applySearchHighlights();
@@ -1683,57 +1824,72 @@ window.eventEditorSetSearchIndex = function(index) {
   scrollToCurrentSearchResult(350);
 };
 
+// ── Keyboard handling ────────────────────────────────────────
+
 document.body.addEventListener('keydown', (event) => {
-  const key = event.key; // "ArrowRight", "ArrowLeft", "ArrowUp", or "ArrowDown"
+  const key = event.key;
 
   if (key === 'Escape') {
     graph.renderer.clearSelection();
     return;
   }
 
-  // Handle zoom
+  // Ctrl+ArrowUp/Down → zoom
   if (event.ctrlKey) {
     let scaleMultiplier = 1;
-    if (key === 'ArrowUp')
-      scaleMultiplier = 1.1;
-    else if (key === 'ArrowDown')
-      scaleMultiplier = 0.9;
-    graph.renderer.setScale(graph.renderer.zoom.scale() * scaleMultiplier);
-    if (scaleMultiplier !== 1)
-      return;
+    if (key === 'ArrowUp') scaleMultiplier = 1.1;
+    else if (key === 'ArrowDown') scaleMultiplier = 0.9;
+    graph.renderer.setScale(graph.renderer.getZoom() * scaleMultiplier);
+    if (scaleMultiplier !== 1) return;
   }
 
-  // Handle translate / navigation
   const selected = graph.renderer.getSelection();
   if (selected === -1) {
-    let vDirection = 0;
-    let hDirection = 0;
+    // No selection — pan with arrow keys
+    let vDir = 0, hDir = 0;
     switch (key) {
-      case 'ArrowUp':
-        vDirection = 1;
-        break;
-      case 'ArrowDown':
-        vDirection = -1;
-        break;
-      case 'ArrowLeft':
-        hDirection = 1;
-        break;
-      case 'ArrowRight':
-        hDirection = -1;
-        break;
+      case 'ArrowUp':    vDir = 1;  break;
+      case 'ArrowDown':  vDir = -1; break;
+      case 'ArrowLeft':  hDir = 1;  break;
+      case 'ArrowRight': hDir = -1; break;
     }
-    const [x, y] = graph.renderer.zoom.translate();
-    graph.renderer.setTranslate([x + 100 * hDirection, y + 100 * vDirection]);
+    const pan = graph.renderer.getPan();
+    graph.renderer.setTranslate([pan.x + 100 * hDir, pan.y + 100 * vDir]);
     return;
   }
+
+  // Arrow navigate between connected nodes
   if (key === 'ArrowUp' || key === 'ArrowDown') {
-    const nodes = key === 'ArrowUp' ? graph.g.predecessors(selected) : graph.g.successors(selected);
-    if (nodes.length > 0) {
-      graph.renderer.scrollTo(nodes[0], true, 500);
-      graph.renderer.select(nodes[0], graph.g);
+    const cy = graph.renderer.cy;
+    if (!cy) return;
+    const node = cy.getElementById(`${selected}`);
+    if (!node || !node.length) return;
+    const neighbors = key === 'ArrowUp'
+      ? node.incomers('node')
+      : node.outgoers('node');
+    if (neighbors.length > 0) {
+      const nextId = neighbors[0].id();
+      graph.renderer.scrollTo(nextId, true, 500);
+      graph.renderer.select(nextId);
     }
   }
 });
+
+// ── QWebChannel bootstrap ────────────────────────────────────
+
+function rerenderAroundCurrentNode(preferredNodeId) {
+  const currentViewport = graph.renderer.getViewport();
+  const targetNodeId = preferredNodeId != null ? preferredNodeId : graph.renderer.getSelection();
+  graph.refresh();
+  graph.render(0);
+  setTimeout(() => {
+    if (targetNodeId != null && targetNodeId !== -1 && graph.renderer.getElement(targetNodeId)) {
+      graph.renderer.scrollTo(targetNodeId, true, 0);
+    } else {
+      graph.renderer.restoreViewport(currentViewport);
+    }
+  }, 20);
+}
 
 new QWebChannel(qt.webChannelTransport, (channel) => {
   widget = channel.objects.widget;
@@ -1741,9 +1897,9 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
   function select(id) {
     if (graph.hasPersistentComponentFilter()) {
       graph.renderOnlyConnected(id);
-      graph.renderer.select(id, graph.g);
+      graph.renderer.select(id);
     } else {
-      graph.renderer.select(id, graph.g);
+      graph.renderer.select(id);
       graph.renderer.scrollTo(id);
     }
   }
@@ -1753,35 +1909,87 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
       graph.clearPersistentComponentFilter();
       graph.render();
     }
-    graph.renderer.select(id, graph.g);
+    graph.renderer.select(id);
     graph.renderer.scrollTo(id, true, 500);
+  }
+
+  function checkCanFastUpdate(newData) {
+    if (!graph.data || !graph._elements.length) return false;
+    if (newData.length !== graph.data.length) return false;
+
+    const oldNodes = {};
+    const oldEdges = {};
+    for (const entry of graph.data) {
+      if (entry.type === 'node') oldNodes[entry.id] = entry;
+      else if (entry.type === 'edge') oldEdges[`${entry.source}-${entry.target}-${entry.data.value}`] = entry;
+    }
+
+    for (const entry of newData) {
+      if (entry.type === 'node') {
+        const oldNode = oldNodes[entry.id];
+        if (!oldNode) return false;
+        if (entry.node_type !== oldNode.node_type) return false;
+        if (entry.data.name !== oldNode.data.name ||
+          entry.data.actor !== oldNode.data.actor ||
+          entry.data.action !== oldNode.data.action ||
+          entry.data.query !== oldNode.data.query ||
+          entry.data.res_flowchart_name !== oldNode.data.res_flowchart_name ||
+          entry.data.entry_point_name !== oldNode.data.entry_point_name) {
+          return false;
+        }
+        const oldParamsCount = oldNode.data.params ? Object.keys(oldNode.data.params).length : 0;
+        const newParamsCount = entry.data.params ? Object.keys(entry.data.params).length : 0;
+        if (oldParamsCount !== newParamsCount) return false;
+        if (newParamsCount > 0) {
+          const oldKeys = Object.keys(oldNode.data.params).sort().join(',');
+          const newKeys = Object.keys(entry.data.params).sort().join(',');
+          if (oldKeys !== newKeys) return false;
+        }
+        const oldRawLabel = getNodeLabel(oldNode);
+        const newRawLabel = getNodeLabel(entry);
+        if (oldRawLabel.split('\n').length !== newRawLabel.split('\n').length) return false;
+      } else if (entry.type === 'edge') {
+        const edgeKey = `${entry.source}-${entry.target}-${entry.data.value}`;
+        if (!oldEdges[edgeKey]) return false;
+      }
+    }
+    return true;
   }
 
   function load(cb) {
     const loadToken = ++pendingLoadFinalizeToken;
     widget.getJson((data) => {
-      if (!data) {
-        return;
-      }
+      if (!data) return;
       const transitionMs = nextGraphTransitionMs;
       nextGraphTransitionMs = GRAPH_TRANSITION_MS;
-      graph.update(data);
-      graph.render(transitionMs);
+      const isFastUpdate = !resetViewportOnNextLoad && checkCanFastUpdate(data);
+      let activeTransitionMs = transitionMs;
+
+      if (isFastUpdate) {
+        graph.updateLabels(data);
+        graph.renderer.fastUpdate(graph._elements);
+        activeTransitionMs = 0;
+      } else {
+        graph.update(data);
+        graph.render(transitionMs);
+      }
+
       const finalizeLoad = () => {
-        if (loadToken !== pendingLoadFinalizeToken) {
-          return;
-        }
+        if (loadToken !== pendingLoadFinalizeToken) return;
         if (preservedViewport && !resetViewportOnNextLoad) {
           graph.renderer.restoreViewport(preservedViewport);
           if (preservedFocusNodeId != null) {
-            const focusedElement = graph.renderer.getElement(preservedFocusNodeId);
-            const currentCenter = getElementCenterInViewport(focusedElement);
-            if (currentCenter && preservedFocusPoint) {
-              const nextTranslate = graph.renderer.zoom.translate().slice();
-              nextTranslate[0] += preservedFocusPoint.x - currentCenter.x;
-              nextTranslate[1] += preservedFocusPoint.y - currentCenter.y;
-              graph.renderer.zoom.translate(nextTranslate);
-              graph.renderer.updateTransform();
+            const focusedEl = graph.renderer.getElement(preservedFocusNodeId);
+            if (focusedEl && preservedFocusPoint) {
+              // Adjust pan so the focus node stays at the same screen position
+              const cy = graph.renderer.cy;
+              if (cy) {
+                const pos = focusedEl.renderedPosition();
+                const dx = preservedFocusPoint.x - pos.x;
+                const dy = preservedFocusPoint.y - pos.y;
+                const pan = cy.pan();
+                cy.pan({ x: pan.x + dx, y: pan.y + dy });
+              }
             }
           }
         }
@@ -1790,9 +1998,7 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
           resetViewportOnNextLoad = false;
         }
         widget.emitReloadedSignal();
-        if (cb) {
-          cb(data);
-        }
+        if (cb) cb(data);
         isDeleting = false;
         suppressNextViewportAdjustment = false;
         preservedViewport = null;
@@ -1800,13 +2006,11 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
         preservedFocusPoint = null;
       };
 
-      setTimeout(finalizeLoad, transitionMs + 20);
+      setTimeout(finalizeLoad, activeTransitionMs + 20);
     });
   }
 
-  widget.flowDataChanged.connect(() => {
-    load();
-  });
+  widget.flowDataChanged.connect(() => { load(); });
 
   widget.fileLoaded.connect(() => {
     graph.clearPersistentComponentFilter();
@@ -1815,54 +2019,133 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
     resetViewportOnNextLoad = true;
   });
 
-  widget.selectRequested.connect((id) => {
-    select(id);
-  });
-
-  widget.revealRequested.connect((id) => {
-    reveal(id);
-  });
+  widget.selectRequested.connect((id) => { select(id); });
+  widget.revealRequested.connect((id) => { reveal(id); });
 
   widget.instantRevealRequested.connect((id) => {
     if (graph.hasPersistentComponentFilter() && !graph.renderer.getElement(id)) {
       graph.clearPersistentComponentFilter();
       graph.render(0);
     }
-    graph.renderer.select(id, graph.g);
+    graph.renderer.select(id);
     graph.renderer.scrollTo(id, true, 0);
   });
 
   widget.preserveViewportRequested.connect(() => {
     preservedViewport = graph.renderer.getViewport();
     preservedFocusNodeId = graph.renderer.closestNodeIdToViewportCenter();
-    preservedFocusPoint = preservedFocusNodeId == null ? null : graph.renderer.viewportCenterPoint();
+    if (preservedFocusNodeId != null) {
+      const el = graph.renderer.getElement(preservedFocusNodeId);
+      preservedFocusPoint = el ? el.renderedPosition() : null;
+    } else {
+      preservedFocusPoint = null;
+    }
     suppressNextViewportAdjustment = true;
   });
 
-  widget.fastGraphReloadRequested.connect(() => {
-    nextGraphTransitionMs = 0;
-  });
+  widget.fastGraphReloadRequested.connect(() => { nextGraphTransitionMs = 0; });
 
-  widget.eventNameVisibilityChanged.connect((visible) => {
-    eventNamesVisible = visible;
-  });
-
-  widget.eventParamVisibilityChanged.connect((visible) => {
-    eventParamVisible = visible;
-  });
-
-  widget.eventMessageVisibilityChanged.connect((visible) => {
-    eventMessagesVisible = visible;
-  });
-
-  widget.actionProhibitionChanged.connect((value) => {
-    actionsProhibited = value;
-  });
-
-  widget.entryPointFilterStateChanged.connect((value) => {
-    hasHiddenEntryPoints = !!value;
-  });
+  widget.eventNameVisibilityChanged.connect((visible) => { eventNamesVisible = visible; });
+  widget.eventParamVisibilityChanged.connect((visible) => { eventParamVisible = visible; });
+  widget.eventMessageVisibilityChanged.connect((visible) => { eventMessagesVisible = visible; });
+  widget.actionProhibitionChanged.connect((value) => { actionsProhibited = value; });
+  widget.entryPointFilterStateChanged.connect((value) => { hasHiddenEntryPoints = !!value; });
 
   widget.emitReadySignal();
   load();
+  if (SHOW_PROFILER) {
+    initProfiler();
+  }
 });
+
+// ── Graphics renderer detection (unchanged) ──────────────────
+
+let rendererInfo = null;
+
+function getGraphicsRenderer() {
+  if (rendererInfo) return rendererInfo;
+  try {
+    const canvas = document.createElement('canvas');
+    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+    if (!gl) { rendererInfo = 'Software (No WebGL)'; return rendererInfo; }
+    const dbgRenderInfo = gl.getExtension('WEBGL_debug_renderer_info');
+    if (dbgRenderInfo) {
+      const renderer = gl.getParameter(dbgRenderInfo.UNMASKED_RENDERER_WEBGL) || '';
+      const lower = renderer.toLowerCase();
+      if (lower.includes('swiftshader') || lower.includes('llvmpipe') || lower.includes('software')) {
+        rendererInfo = 'Software (' + renderer.split(' vs_')[0].split(' Direct3D')[0] + ')';
+      } else {
+        rendererInfo = 'GPU (' + renderer.replace(/^ANGLE \((.*)\)$/, '$1').split(' Direct3D')[0] + ')';
+      }
+    } else {
+      rendererInfo = 'GPU (WebGL Active)';
+    }
+  } catch (e) {
+    rendererInfo = 'Unknown';
+  }
+  return rendererInfo;
+}
+
+// ── Profiler HUD ─────────────────────────────────────────────
+
+function initProfiler() {
+  fpsContainer = document.createElement('div');
+  fpsContainer.className = 'profiler-hud';
+  document.body.appendChild(fpsContainer);
+  requestAnimationFrame(profileLoop);
+}
+
+function profileLoop() {
+  const now = performance.now();
+  frameCount++;
+
+  if (now - lastFpsUpdate >= 500) {
+    currentFps = Math.round((frameCount * 1000) / (now - lastFpsUpdate));
+    frameCount = 0;
+    lastFpsUpdate = now;
+
+    if (currentFps < minFps && currentFps > 0) minFps = currentFps;
+    if (currentFps > maxFps) maxFps = currentFps;
+
+    const avgCpu = cpuTimeHistory.length
+      ? (cpuTimeHistory.reduce((a, b) => a + b, 0) / cpuTimeHistory.length).toFixed(2)
+      : '0.00';
+    cpuTimeHistory = [];
+
+    if (fpsContainer && graph) {
+      const cy = graph.renderer.cy;
+      const scale = cy ? cy.zoom() : 1.0;
+      const totalNodes = cy ? cy.nodes().length : 0;
+      const totalEdges = graph.edgeCount();
+
+      const renderer = getGraphicsRenderer();
+      const isGPU = renderer.startsWith('GPU');
+      const hwAcc = isGPU ? 'Enabled (GPU)' : 'Disabled (CPU)';
+      const lastOpTime = lastUpdatePath === 'Fast In-Place'
+        ? `${lastUpdateTime.toFixed(1)} ms`
+        : `${lastLayoutTime.toFixed(1)} ms`;
+
+      // Cytoscape canvas doesn't have a DOM node count per se; report canvas elements
+      const domCount = cy ? cy.nodes().length + cy.edges().length : 0;
+
+      fpsContainer.innerHTML =
+        `<div class="profiler-hud-header">Performance Profiler</div>` +
+        `<div class="profiler-hud-row"><span class="profiler-hud-label">FPS</span><span class="profiler-hud-val">${currentFps} (Min: ${minFps === 1000 ? 0 : minFps} / Max: ${maxFps})</span></div>` +
+        `<div class="profiler-hud-row"><span class="profiler-hud-label">Hardware Accel</span><span class="profiler-hud-val" style="color: ${isGPU ? '#4caf50' : '#f44336'}">${hwAcc}</span></div>` +
+        `<div class="profiler-hud-row"><span class="profiler-hud-label">Graphics Engine</span><span class="profiler-hud-val">${renderer}</span></div>` +
+        `<div class="profiler-hud-row"><span class="profiler-hud-label">Pan/Zoom CPU</span><span class="profiler-hud-val">${avgCpu} ms</span></div>` +
+        `<div class="profiler-hud-row"><span class="profiler-hud-label">Last Render Path</span><span class="profiler-hud-val">${lastUpdatePath}</span></div>` +
+        `<div class="profiler-hud-row"><span class="profiler-hud-label">Last Render Time</span><span class="profiler-hud-val">${lastOpTime}</span></div>` +
+        `<div class="profiler-hud-row"><span class="profiler-hud-label">Viewport Scale</span><span class="profiler-hud-val">${scale.toFixed(2)}x</span></div>` +
+        `<div class="profiler-hud-row"><span class="profiler-hud-label">Total Nodes</span><span class="profiler-hud-val">${totalNodes}</span></div>` +
+        `<div class="profiler-hud-row"><span class="profiler-hud-label">Total Edges</span><span class="profiler-hud-val">${totalEdges}</span></div>` +
+        `<div class="profiler-hud-row"><span class="profiler-hud-label">Canvas Elements</span><span class="profiler-hud-val">${domCount} nodes+edges</span></div>`;
+
+      if (currentFps < 30) fpsContainer.style.borderColor = '#ff3333';
+      else if (currentFps < 50) fpsContainer.style.borderColor = '#ffcc00';
+      else fpsContainer.style.borderColor = '';
+    }
+  }
+
+  requestAnimationFrame(profileLoop);
+}

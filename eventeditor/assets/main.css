@@ -1,9 +1,15 @@
-html, body {
-  background-color: #383838;
+html,
+body {
+  background-color: #f5f5f5;
   width: 100%;
   height: 100%;
   margin: 0;
   overflow: hidden;
+  transition: background-color 0.15s ease;
+}
+
+body.dark-mode {
+  background-color: #3c3f41;
 }
 
 #graph {
@@ -11,154 +17,129 @@ html, body {
   height: 100%;
 }
 
-/* Graph text */
-text, .edgeLabel {
-  font-weight: 300;
-  font-family: "Helvetica Neue", Helvetica, Arial, sans-serf;
-  font-size: 14px;
-}
-.edgeLabel {
-  color: white;
-  fill: white;
-}
-.edgeLabel foreignObject,
-.edgeLabel div,
-.edgeLabel span {
-  overflow: visible;
-  white-space: nowrap;
-}
-.edgeLabel div,
-.edgeLabel span {
-  display: inline-block;
-  padding: 0 1px;
-  box-sizing: border-box;
-}
-
-/* Nodes */
-.node.selected > :first-child {
-  stroke: #008ff7;
-  stroke-width: 3px;
-}
-
-.node.search-match > :first-child {
-  stroke: #e9c46a;
-  stroke-width: 3px;
-}
-
-.node.search-current > :first-child {
-  stroke: #ff9f1c;
-  stroke-width: 4px;
-}
-
-.node > :first-child {
-  stroke: #333;
-  fill: #999;
-  stroke-width: 1.5px;
-}
-.node .label {
-  fill: #fffeed;
-}
-
-.node .label .message-tag {
-  fill: #b8bcc4;
-  font-weight: 600;
-}
-
-.node.entry > :first-child {
-  fill: #fff;
-}
-.node.entry .label {
-  fill: #303030;
-}
-
-.node.action > :first-child {
-  fill: #555;
-}
-
-.node.switch > :first-child {
-  fill: #0a62d6;
-}
-
-.node.fork .label, .node.join .label {
-  fill: #303030;
-}
-
-.node.sub_flow > :first-child {
-  fill: #c4371f;
-}
-
-.edgePath path.path {
-  stroke: #888;
-  fill: none;
-  stroke-width: 1.5px;
-}
-
-.edgePath marker {
-  fill: #cecbcb;
-}
-
-.edgePath.selected-in-edge path.path {
-  stroke: #008ff7;
-  stroke-width: 2px;
-}
-.edgePath.selected-in-edge marker {
-  fill: #008ff7;
-}
-.edgePath.selected-out-edge path.path {
-  stroke: #ffffff;
-  stroke-width: 2px;
-}
-.edgePath.selected-out-edge marker {
-  fill: #ffffff;
-}
-
-.selected-in-edge-label, .selected-out-edge-label {
-  font-weight: bold;
-  font-size: 110%;
-  text-shadow: 0 0 10px #000;
-}
-
-.d3-context-menu-theme ul {
+/* Vanilla context menu (replaces d3-context-menu) */
+.context-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 180px;
   max-height: calc(100vh - 32px);
   overflow-y: auto;
   overflow-x: hidden;
   scrollbar-width: thin;
+  background-color: #ffffff;
+  border: 1px solid #cccccc;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  padding: 4px 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  color: #333333;
+  user-select: none;
 }
 
-.d3-context-menu-theme ul::-webkit-scrollbar {
+.context-menu::-webkit-scrollbar {
   width: 8px;
 }
 
-.d3-context-menu-theme ul::-webkit-scrollbar-thumb {
+.context-menu::-webkit-scrollbar-thumb {
   background-color: rgba(100, 100, 100, 0.55);
   border-radius: 4px;
 }
 
-.d3-context-menu-theme ul::-webkit-scrollbar-track {
+.context-menu::-webkit-scrollbar-track {
   background: transparent;
 }
 
-body.dark-mode .d3-context-menu-theme {
+.context-menu-item {
+  padding: 6px 16px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.context-menu-item:hover {
+  background-color: #e8e8e8;
+}
+
+.context-menu-divider {
+  border: none;
+  border-top: 1px solid #dddddd;
+  margin: 4px 0;
+}
+
+body.dark-mode .context-menu {
   background-color: #4a525e;
   border-color: #626b77;
   color: #f0f0f0;
 }
 
-body.dark-mode .d3-context-menu-theme ul li {
-  color: #f0f0f0;
-}
-
-body.dark-mode .d3-context-menu-theme ul li:hover {
+body.dark-mode .context-menu-item:hover {
   background-color: #57606d;
 }
 
-body.dark-mode .d3-context-menu-theme ul li.is-header,
-body.dark-mode .d3-context-menu-theme ul li.is-header:hover,
-body.dark-mode .d3-context-menu-theme ul li.is-disabled,
-body.dark-mode .d3-context-menu-theme ul li.is-disabled:hover {
-  color: #bfc6cf;
+body.dark-mode .context-menu-divider {
+  border-top-color: #626b77;
 }
 
-body.dark-mode .d3-context-menu-theme ul hr {
-  border-color: #626b77;
+/* Profiler HUD styling */
+.profiler-hud {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  background: rgba(240, 240, 240, 0.95);
+  color: #333333;
+  padding: 10px 14px;
+  font-family: Consolas, Menlo, Monaco, "Courier New", monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  border-radius: 4px;
+  z-index: 9999;
+  pointer-events: none;
+  border: 1px solid #cccccc;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  min-width: 280px;
+  box-sizing: border-box;
+}
+
+body.dark-mode .profiler-hud {
+  background: rgba(60, 63, 65, 0.95);
+  color: #f0f0f0;
+  border: 1px solid #626b77;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+.profiler-hud-header {
+  font-weight: bold;
+  font-size: 12px;
+  color: #008ff7;
+  border-bottom: 1px solid #cccccc;
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+}
+
+body.dark-mode .profiler-hud-header {
+  color: #2a82da;
+  border-bottom: 1px solid #626b77;
+}
+
+.profiler-hud-row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.profiler-hud-row:last-child {
+  margin-bottom: 0;
+}
+
+.profiler-hud-label {
+  font-weight: bold;
+  color: #666666;
+}
+
+body.dark-mode .profiler-hud-label {
+  color: #a0a6b0;
+}
+
+.profiler-hud-val {
+  font-weight: 500;
 }
