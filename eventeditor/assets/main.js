@@ -1516,12 +1516,22 @@ class Graph {
 
   updateLabels(data) {
     this.data = data;
+    // Build a Map of node id → element index for O(1) lookups (replaces O(n) .find() per entry)
+    const nodeElementMap = new Map();
+    for (let i = 0; i < this._elements.length; i++) {
+      const el = this._elements[i];
+      if (el.group === 'nodes') {
+        nodeElementMap.set(el.data.id, i);
+      }
+    }
     for (const entry of data) {
       if (entry.type === 'node') {
         const rawLabel = getNodeLabel(entry);
-        // Update element descriptor in place
-        const el = this._elements.find((e) => e.group === 'nodes' && e.data.id === `${entry.id}`);
-        if (el) {
+        const key = `${entry.id}`;
+        // Update element descriptor in place via Map lookup — O(1)
+        const idx = nodeElementMap.get(key);
+        if (idx !== undefined) {
+          const el = this._elements[idx];
           const label = getNodeLayoutLabel(rawLabel);
           const dimensions = computeNodeDimensions(label);
           el.data.label = label;
@@ -1530,7 +1540,7 @@ class Graph {
           el.data.nodeHeight = dimensions.height;
         }
         // Update node data map
-        this._nodeDataMap[`${entry.id}`] = entry;
+        this._nodeDataMap[key] = entry;
       }
     }
   }
