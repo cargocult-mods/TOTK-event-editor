@@ -277,7 +277,7 @@ class FlowchartView(q.QWidget):
         self.channel = QWebChannel()
         self.channel.registerObject('widget', self.web_object)
         self.view.page().setWebChannel(self.channel)
-        self.view.page().setBackgroundColor(qg.QColor(0x38, 0x38, 0x38));
+        self.view.page().setBackgroundColor(qg.QColor(0x3c, 0x3f, 0x41) if self.dark_mode else qg.QColor(0xf5, 0xf5, 0xf5))
         self.view.setUrl(qc.QUrl.fromLocalFile(get_path('assets/index.html')))
 
         self.entry_point_view = q.QListView(self)
@@ -445,6 +445,10 @@ class FlowchartView(q.QWidget):
 
     def setDarkMode(self, dark_mode: bool) -> None:
         self.dark_mode = dark_mode
+        if dark_mode:
+            self.view.page().setBackgroundColor(qg.QColor(0x3c, 0x3f, 0x41))
+        else:
+            self.view.page().setBackgroundColor(qg.QColor(0xf5, 0xf5, 0xf5))
         self._syncDarkModeToPage()
 
     def _syncDarkModeToPage(self) -> None:

@@ -171,6 +171,10 @@ def _build_named_tag(name: str, **kwargs: typing.Any) -> str:
     return '{{' + ' '.join(parts) + '}}'
 
 
+_sarc_cache: typing.Dict[typing.Tuple[str, float, int], typing.Dict[str, typing.List[typing.Tuple[str, bytes]]]] = {}
+_parsed_msbt_cache: typing.Dict[typing.Tuple[str, int, bool], typing.Dict[str, str]] = {}
+
+
 def load_messages_for_ids(path: str, message_ids: typing.Iterable[str], show_tags: bool = True,
                           include_missing: bool = False) -> typing.Dict[str, str]:
     archive_path = Path(path)
@@ -181,9 +185,24 @@ def load_messages_for_ids(path: str, message_ids: typing.Iterable[str], show_tag
     if not needed:
         return {}
 
-    data = archive_path.read_bytes()
-    if totk_zs.is_compressed_path(str(archive_path)):
-        data = totk_zs.decompress(str(archive_path), data)
+    try:
+        stat = archive_path.stat()
+        cache_key = (str(archive_path.resolve()), stat.st_mtime, stat.st_size)
+    except OSError as exc:
+        raise MessageArchiveError(f'Failed to read archive stats: {archive_path}') from exc
+
+    if cache_key in _sarc_cache:
+        alias_to_files = _sarc_cache[cache_key]
+    else:
+        data = archive_path.read_bytes()
+        if totk_zs.is_compressed_path(str(archive_path)):
+            data = totk_zs.decompress(str(archive_path), data)
+
+        alias_to_files = {}
+        for file_name, file_data in _iter_msbt_files(str(archive_path), data):
+            for alias in _candidate_prefix_aliases(file_name):
+                alias_to_files.setdefault(alias, []).append((file_name, file_data))
+        _sarc_cache[cache_key] = alias_to_files
 
     messages: typing.Dict[str, str] = {}
     if include_missing:
@@ -191,29 +210,41 @@ def load_messages_for_ids(path: str, message_ids: typing.Iterable[str], show_tag
             for label in labels:
                 messages[f'{prefix}:{label}'] = MSBT_NOT_FOUND_TEXT
 
-    for file_name, file_data in _iter_msbt_files(str(archive_path), data):
-        matching_prefixes = _matching_prefixes(file_name, needed.keys())
-        if not matching_prefixes:
-            continue
+    files_to_parse: typing.Dict[str, bytes] = {}
+    prefix_to_filenames: typing.Dict[str, typing.List[str]] = {}
+    for prefix in needed.keys():
+        for file_name, file_data in alias_to_files.get(prefix, []):
+            files_to_parse[file_name] = file_data
+            prefix_to_filenames.setdefault(prefix, []).append(file_name)
 
-        try:
-            parsed_messages = _parse_msbt(file_data, show_tags=show_tags)
-        except MessageArchiveError:
-            continue
-        if not parsed_messages:
-            if include_missing:
-                for prefix in matching_prefixes:
-                    for label in needed[prefix]:
-                        messages[f'{prefix}:{label}'] = MESSAGE_ID_NOT_FOUND_TEXT
-            continue
+    parsed_cache: typing.Dict[str, typing.Dict[str, str]] = {}
+    for file_name, file_data in files_to_parse.items():
+        parsed_key = (file_name, id(file_data), show_tags)
+        if parsed_key in _parsed_msbt_cache:
+            parsed_messages = _parsed_msbt_cache[parsed_key]
+        else:
+            try:
+                parsed_messages = _parse_msbt(file_data, show_tags=show_tags)
+            except MessageArchiveError:
+                parsed_messages = {}
+            _parsed_msbt_cache[parsed_key] = parsed_messages
+        parsed_cache[file_name] = parsed_messages
 
-        for prefix in matching_prefixes:
-            for label in needed[prefix]:
-                text = parsed_messages.get(label)
-                if text is not None:
-                    messages[f'{prefix}:{label}'] = text
-                elif include_missing:
+    for prefix in needed.keys():
+        filenames = prefix_to_filenames.get(prefix, [])
+        for label in needed[prefix]:
+            found = False
+            for file_name in filenames:
+                parsed_messages = parsed_cache.get(file_name, {})
+                if label in parsed_messages:
+                    messages[f'{prefix}:{label}'] = parsed_messages[label]
+                    found = True
+                    break
+            if not found and include_missing:
+                if filenames:
                     messages[f'{prefix}:{label}'] = MESSAGE_ID_NOT_FOUND_TEXT
+                else:
+                    messages[f'{prefix}:{label}'] = MSBT_NOT_FOUND_TEXT
 
     return messages
 
