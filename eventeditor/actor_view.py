@@ -9,6 +9,7 @@ import eventeditor.container_xml as cxml
 from eventeditor.container_model import ContainerModel
 from eventeditor.container_view import ContainerView
 from eventeditor.flow_data import FlowDataChangeReason
+from eventeditor.sortable_proxy_model import SortableHeaderProxyModel
 import eventeditor.util as util
 from evfl import Container, EventFlow, Actor, ActorIdentifier
 from evfl.common import StringHolder
@@ -233,19 +234,28 @@ class ActorView(q.QWidget):
     def __init__(self, parent, flow_data) -> None:
         super().__init__(parent)
         self.flow_data = flow_data
+        self.actor_sort_column: typing.Optional[int] = None
+        self.actor_sort_order = qc.Qt.AscendingOrder
         self.initWidgets()
         self.initLayout()
         self.connectWidgets()
 
     def initWidgets(self) -> None:
+        self.actor_proxy_model = SortableHeaderProxyModel(self)
+        self.actor_proxy_model.setSourceModel(self.flow_data.actor_model)
+        self.actor_proxy_model.setSortCaseSensitivity(qc.Qt.CaseInsensitive)
+        self.actor_proxy_model.setDynamicSortFilter(True)
+
         self.actor_view = q.QTableView()
-        self.actor_view.setModel(self.flow_data.actor_model)
+        self.actor_view.setModel(self.actor_proxy_model)
         self.actor_view.verticalHeader().hide()
         self.actor_view.setSelectionBehavior(q.QAbstractItemView.SelectRows)
         self.actor_view.setSelectionMode(q.QAbstractItemView.ExtendedSelection)
         self.actor_view.horizontalHeader().setSectionResizeMode(q.QHeaderView.ResizeToContents)
         self.actor_view.horizontalHeader().setSectionResizeMode(0, q.QHeaderView.Stretch)
         self.actor_view.horizontalHeader().setSectionResizeMode(1, q.QHeaderView.Stretch)
+        self.actor_view.horizontalHeader().setSectionsClickable(True)
+        self.actor_view.horizontalHeader().setSortIndicatorShown(False)
         self.actor_view.setEditTriggers(q.QAbstractItemView.NoEditTriggers);
         self.actor_view.setContextMenuPolicy(qc.Qt.CustomContextMenu)
         self.actor_view.customContextMenuRequested.connect(self.onContextMenu)
@@ -283,6 +293,7 @@ class ActorView(q.QWidget):
         self.actor_view.doubleClicked.connect(self.editActor)
         self.actor_view.selectionModel().currentRowChanged.connect(self.onCurrentChanged)
         self.actor_view.selectionModel().selectionChanged.connect(self.onSelectionChanged)
+        self.actor_view.horizontalHeader().sectionClicked.connect(self.onActorHeaderClicked)
 
     def updateNumActorLabel(self, *_) -> None:
         self.num_actors_label.setText(f'{self.flow_data.actor_model.rowCount(None)} actor(s)')
@@ -294,11 +305,17 @@ class ActorView(q.QWidget):
         dialog.exec_()
 
     def editActor(self, idx: qc.QModelIndex) -> None:
-        dialog = ActorEditDialog(self, self.flow_data, idx.row())
+        source_idx = self._mapActorIndexToSource(idx)
+        if not source_idx.isValid():
+            return
+        dialog = ActorEditDialog(self, self.flow_data, source_idx.row())
         dialog.exec_()
 
     def removeActor(self, idx: qc.QModelIndex) -> None:
-        actor = idx.data(qc.Qt.UserRole)
+        source_idx = self._mapActorIndexToSource(idx)
+        if not source_idx.isValid():
+            return
+        actor = source_idx.data(qc.Qt.UserRole)
         if util.is_actor_in_use(self.flow_data.flow.flowchart.events, actor):
             q.QMessageBox.critical(self, 'Cannot delete actor', f'{actor.identifier} cannot be deleted because it is used by events. Please remove any references to this actor and try again.')
             return
@@ -313,7 +330,32 @@ class ActorView(q.QWidget):
         smodel = self.actor_view.selectionModel()
         if not smodel:
             return []
-        return smodel.selectedRows()
+        rows: typing.List[qc.QModelIndex] = []
+        for index in smodel.selectedRows():
+            source_index = self._mapActorIndexToSource(index)
+            if source_index.isValid():
+                rows.append(source_index)
+        return rows
+
+    def _mapActorIndexToSource(self, index: qc.QModelIndex) -> qc.QModelIndex:
+        if not index.isValid():
+            return qc.QModelIndex()
+        if index.model() is self.actor_proxy_model:
+            return self.actor_proxy_model.mapToSource(index)
+        return index
+
+    def onActorHeaderClicked(self, section: int) -> None:
+        if self.actor_sort_column == section and self.actor_sort_order == qc.Qt.AscendingOrder:
+            self.actor_sort_order = qc.Qt.DescendingOrder
+        else:
+            self.actor_sort_column = section
+            self.actor_sort_order = qc.Qt.AscendingOrder
+
+        header = self.actor_view.horizontalHeader()
+        header.setSortIndicator(section, self.actor_sort_order)
+        header.setSortIndicatorShown(True)
+        self.actor_proxy_model.setSortDescriptor(section, 'Z-A' if self.actor_sort_order == qc.Qt.DescendingOrder else 'A-Z')
+        self.actor_proxy_model.sort(section, self.actor_sort_order)
 
     def _getSelectedActors(self) -> typing.List[Actor]:
         return [idx.data(qc.Qt.UserRole) for idx in self._getSelectedRows()]

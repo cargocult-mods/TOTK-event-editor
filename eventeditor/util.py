@@ -179,7 +179,29 @@ class ItemEditorFactory(q.QItemEditorFactory):
             return box
         return super().createEditor(userType, parent)
 
-def set_view_delegate(view) -> None:
-    delegate = q.QStyledItemDelegate()
+class ItemDelegate(q.QStyledItemDelegate):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._pending_editor_values = {}
+
+    def _editorValueKey(self, index: qc.QModelIndex):
+        return (id(index.model()), index.row(), index.column())
+
+    def rememberEditorValue(self, index: qc.QModelIndex, value) -> None:
+        self._pending_editor_values[self._editorValueKey(index)] = value
+
+    def setEditorData(self, editor, index: qc.QModelIndex) -> None:
+        key = self._editorValueKey(index)
+        if key in self._pending_editor_values:
+            value = self._pending_editor_values.pop(key)
+            if isinstance(editor, q.QLineEdit):
+                editor.setText(str(value))
+                editor.selectAll()
+                return
+        super().setEditorData(editor, index)
+
+def set_view_delegate(view) -> ItemDelegate:
+    delegate = ItemDelegate(view)
     delegate.setItemEditorFactory(ItemEditorFactory())
     view.setItemDelegate(delegate)
+    return delegate

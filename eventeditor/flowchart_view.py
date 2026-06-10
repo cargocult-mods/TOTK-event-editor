@@ -1289,7 +1289,12 @@ class FlowchartView(q.QWidget):
         rows = self._getSelectedEntryPointRowsFromView()
         if not rows:
             return
-        payload = self._serializeEntryPointRowsPayload(rows)
+        try:
+            payload = self._serializeEntryPointRowsPayload(rows)
+        except Exception as exc:
+            traceback.print_exc()
+            q.QMessageBox.critical(self, 'Copy entry points', f'Failed to copy entry point trees.\n\n{exc}')
+            return
         if not payload.get('entry_points'):
             q.QMessageBox.information(self, 'Copy entry points', 'No entry point trees were copied.')
             return
@@ -1314,7 +1319,12 @@ class FlowchartView(q.QWidget):
         rows = self._getSelectedEntryPointRowsFromView()
         if not rows:
             return
-        payload = self._serializeEntryPointRowsPayload(rows)
+        try:
+            payload = self._serializeEntryPointRowsPayload(rows)
+        except Exception as exc:
+            traceback.print_exc()
+            q.QMessageBox.critical(self, 'Export entry points', f'Failed to export entry point trees.\n\n{exc}')
+            return
         if not payload.get('entry_points'):
             return
         default_name = 'entry_points.xml'
@@ -1581,6 +1591,17 @@ class FlowchartView(q.QWidget):
         container.data = copy.deepcopy(data)
         return container
 
+    def _copyEntryPointItems(self, entry_point: EntryPoint) -> typing.Dict[str, typing.Any]:
+        return copy.deepcopy(getattr(entry_point, 'items', {}) or {})
+
+    def _setEntryPointItems(self, entry_point: EntryPoint, items: typing.Dict[str, typing.Any]) -> None:
+        if not hasattr(entry_point, 'items'):
+            return
+        try:
+            entry_point.items = copy.deepcopy(items or {})
+        except AttributeError:
+            pass
+
     def _serializeActor(self, actor: Actor) -> typing.Dict[str, typing.Any]:
         return {
             'identifier': (actor.identifier.name, actor.identifier.sub_name),
@@ -1709,7 +1730,7 @@ class FlowchartView(q.QWidget):
             main_event_idx = index_by_event.get(main_event)
             payloads.append({
                 'name': entry_point.name,
-                'items': copy.deepcopy(entry_point.items),
+                'items': self._copyEntryPointItems(entry_point),
                 'main_event_idx': main_event_idx if main_event_idx in included_event_indices else None,
                 'main_event_name': main_event.name if main_event else '',
             })
@@ -1995,7 +2016,7 @@ class FlowchartView(q.QWidget):
                     continue
                 entry_point = EntryPoint(self._makeUniqueEntryPointName(entry_payload['name']))
                 entry_point.main_event.v = target_event
-                entry_point.items = copy.deepcopy(entry_payload.get('items', {}))
+                self._setEntryPointItems(entry_point, entry_payload.get('items', {}))
                 flowchart.entry_points.append(entry_point)
                 created_entry_points.append(entry_point)
         except Exception as exc:

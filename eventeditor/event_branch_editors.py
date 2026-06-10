@@ -72,6 +72,8 @@ class SwitchCaseModelColumn(IntEnum):
 class SwitchCaseModel(qc.QAbstractTableModel):
     def __init__(self, parent, cases: _Cases) -> None:
         super().__init__(parent)
+        self._sort_descriptor_column: typing.Optional[int] = None
+        self._sort_descriptor_text = ''
         self.setCases(cases)
 
     def isValid(self) -> bool:
@@ -163,10 +165,34 @@ class SwitchCaseModel(qc.QAbstractTableModel):
         if role != qc.Qt.DisplayRole:
             return qc.QVariant()
         if section == SwitchCaseModelColumn.Value:
-            return 'Value'
-        if section == SwitchCaseModelColumn.Event:
-            return 'Event'
-        return 'Unknown'
+            text = 'Value'
+        elif section == SwitchCaseModelColumn.Event:
+            text = 'Event'
+        else:
+            text = 'Unknown'
+        if orientation == qc.Qt.Horizontal and section == self._sort_descriptor_column and self._sort_descriptor_text:
+            return f'{text} ({self._sort_descriptor_text})'
+        return text
+
+    def setSortDescriptor(self, column: int, text: str) -> None:
+        previous_column = self._sort_descriptor_column
+        self._sort_descriptor_column = column if column >= 0 and text else None
+        self._sort_descriptor_text = text
+        columns = [col for col in (previous_column, self._sort_descriptor_column) if col is not None]
+        if columns:
+            self.headerDataChanged.emit(qc.Qt.Horizontal, min(columns), max(columns))
+
+    def sort(self, column: int, order: qc.Qt.SortOrder = qc.Qt.AscendingOrder) -> None:
+        reverse = order == qc.Qt.DescendingOrder
+        if column == SwitchCaseModelColumn.Value:
+            key = lambda case: case.value
+        elif column == SwitchCaseModelColumn.Event:
+            key = lambda case: '<placeholder>' if case.event is _PLACEHOLDER_EVENT else util.get_event_full_description(case.event).lower()
+        else:
+            return
+        self.layoutAboutToBeChanged.emit()
+        self.l.sort(key=key, reverse=reverse)
+        self.layoutChanged.emit()
 
 class SwitchEventEditDialog(q.QDialog):
     chooserEventDoubleClicked = qc.pyqtSignal(int)
@@ -179,6 +205,8 @@ class SwitchEventEditDialog(q.QDialog):
         self.flow_data = flow_data
         self.orig_cases = cases
         self.model = SwitchCaseModel(self, cases)
+        self.sort_column: typing.Optional[int] = None
+        self.sort_order = qc.Qt.AscendingOrder
 
         self.tview = EventBranchEditorTableView(None, self.flow_data)
         self.tview.setModel(self.model)
@@ -188,6 +216,9 @@ class SwitchEventEditDialog(q.QDialog):
         self.tview.horizontalHeader().setMinimumSectionSize(80)
         self.tview.horizontalHeader().setSectionResizeMode(q.QHeaderView.ResizeToContents)
         self.tview.horizontalHeader().setSectionResizeMode(1, q.QHeaderView.Stretch)
+        self.tview.horizontalHeader().setSectionsClickable(True)
+        self.tview.horizontalHeader().setSortIndicatorShown(False)
+        self.tview.horizontalHeader().sectionClicked.connect(self.onHeaderClicked)
         self.tview.setContextMenuPolicy(qc.Qt.CustomContextMenu)
         self.tview.customContextMenuRequested.connect(self.onContextMenu)
         self.tview.chooserEventDoubleClicked.connect(self.chooserEventDoubleClicked)
@@ -221,6 +252,19 @@ class SwitchEventEditDialog(q.QDialog):
         if not ok:
             return
         self.model.appendCase(SwitchCase(value, _PLACEHOLDER_EVENT))
+
+    def onHeaderClicked(self, section: int) -> None:
+        if self.sort_column == section and self.sort_order == qc.Qt.AscendingOrder:
+            self.sort_order = qc.Qt.DescendingOrder
+        else:
+            self.sort_column = section
+            self.sort_order = qc.Qt.AscendingOrder
+
+        header = self.tview.horizontalHeader()
+        header.setSortIndicator(section, self.sort_order)
+        header.setSortIndicatorShown(True)
+        self.model.setSortDescriptor(section, 'Z-A' if self.sort_order == qc.Qt.DescendingOrder else 'A-Z')
+        self.model.sort(section, self.sort_order)
 
     def onContextMenu(self, pos) -> None:
         smodel = self.tview.selectionModel()

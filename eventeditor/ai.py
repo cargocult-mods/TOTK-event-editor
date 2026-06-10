@@ -9,9 +9,19 @@ import oead
 
 _rom_path: typing.Optional[Path] = None
 def set_rom_path(p: typing.Optional[str]) -> None:
-    if p:
-        global _rom_path
-        _rom_path = Path(p)
+    global _rom_path
+    _rom_path = Path(p) if p else None
+    clear_cached_metadata()
+
+def clear_cached_metadata() -> None:
+    try:
+        load_aiprog.cache_clear()
+    except NameError:
+        pass
+    try:
+        ai_def_instance.clear()
+    except NameError:
+        pass
 
 def _list_aiprog_files(path: Path):
     try:
@@ -118,6 +128,9 @@ class AIParameter(typing.NamedTuple):
 class AIDef:
     def __init__(self) -> None:
         self._ai_defs: dict = dict()
+
+    def clear(self) -> None:
+        self._ai_defs = dict()
 
     def _init_ai_defs(self) -> None:
         if self._ai_defs or not _rom_path:

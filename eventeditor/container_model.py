@@ -12,6 +12,9 @@ def is_choice_label_key(key: typing.Any) -> bool:
     lowered = key.lower()
     return lowered.startswith('choicelabel') and lowered[len('choicelabel'):].isdigit()
 
+def is_message_id_key(key: typing.Any) -> bool:
+    return isinstance(key, str) and key.lower() == 'messageid'
+
 def format_container_display_value(key: typing.Any, value: typing.Any) -> typing.Any:
     if is_choice_label_key(key):
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:

@@ -1,4 +1,5 @@
 import tempfile
+import types
 import unittest
 from pathlib import Path
 import struct
@@ -12,6 +13,12 @@ from eventeditor.container_model import (
     ContainerModel,
     ContainerModelColumn,
     format_container_display_value,
+)
+from eventeditor.event_edit_dialog import (
+    _format_period_finding,
+    _parameter_period_findings,
+    _plain_period_finding,
+    _parse_parameter_payload,
 )
 from eventeditor.event_model import EventModel, EventModelColumn
 from eventeditor.__main__ import (
@@ -306,6 +313,78 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn('ChoiceLabel1=0000', model.data(index, qc.Qt.DisplayRole))
         self.assertIn('<b>ChoiceLabel1</b>: 0000', model.data(index, qc.Qt.ToolTipRole))
 
+    def test_event_edit_input_cleanup_helpers(self):
+        self.assertEqual(
+            _parse_parameter_payload({
+                'format': 'TOTKEventEditorParameters',
+                'node_type': 'action',
+                'params': {'MessageId': 'EventFlowMsg/CC_Test:talk_000'},
+            }),
+            ({'MessageId': 'EventFlowMsg/CC_Test:talk_000'}, 'action'),
+        )
+        self.assertEqual(
+            _parse_parameter_payload({'EventTalk': {'MessageId': 'EventFlowMsg/CC_Test:talk_000'}}, 'EventTalk'),
+            ({'MessageId': 'EventFlowMsg/CC_Test:talk_000'}, None),
+        )
+        self.assertEqual(
+            _parse_parameter_payload({'EventTalk': {'MessageId': 'EventFlowMsg/CC_Test:talk_000'}}),
+            ({'MessageId': 'EventFlowMsg/CC_Test:talk_000'}, None),
+        )
+
+    def test_node_property_period_findings_are_collected_on_close(self):
+        container = Container()
+        container.data = {
+            'MessageId': 'EventFlowMsg/CC_Test:talk_000.bad',
+            'BackupFile': 'EventFlowMsg/Other_Test.msbt',
+            'DisplayName': 'Npc.Test',
+        }
+
+        findings = _parameter_period_findings(container)
+
+        self.assertEqual(
+            findings,
+            [
+                {'field': 'MessageId', 'parts': {'ID': 'talk_000.bad'}},
+                {'field': 'BackupFile', 'value': 'EventFlowMsg/Other_Test.msbt'},
+            ],
+        )
+        self.assertEqual(
+            _plain_period_finding('Flowchart', 'CC_Test.bfevfl.zs'),
+            {'field': 'Flowchart', 'value': 'CC_Test.bfevfl.zs'},
+        )
+        self.assertEqual(
+            _plain_period_finding('Flowchart', 'CC_Test'),
+            None,
+        )
+        self.assertEqual(
+            _parameter_period_findings(Container()),
+            [],
+        )
+        self.assertEqual(
+            _format_period_finding({
+                'field': 'MessageId',
+                'parts': {'ID': 'talk_000.bad'},
+            }),
+            'Message:\n  ID:   talk_000.bad',
+        )
+        self.assertEqual(
+            _format_period_finding({
+                'field': 'MessageId',
+                'parts': {'MSBT': 'EventFlowMsg/CC_Test.msbt'},
+            }),
+            'Message:\n  MSBT: EventFlowMsg/CC_Test.msbt',
+        )
+        self.assertEqual(
+            _format_period_finding({
+                'field': 'MessageId',
+                'parts': {
+                    'MSBT': 'EventFlowMsg/CC_Test.msbt',
+                    'ID': 'talk_000.bad',
+                },
+            }),
+            'Message:\n  MSBT: EventFlowMsg/CC_Test.msbt\n  ID:   talk_000.bad',
+        )
+
     def test_actor_xml_roundtrip(self):
         payload = [
             {
@@ -367,6 +446,35 @@ class ReconstructedQoLTests(unittest.TestCase):
             entry_point_tree_xml.loads_payload(entry_point_tree_xml.dumps_payload(payload)),
             expected,
         )
+
+    def test_entry_point_copy_tolerates_vanilla_entry_points_without_items(self):
+        from eventeditor.flowchart_view import FlowchartView
+
+        flow = EventFlow()
+        flow.name = 'InitTalk'
+        flow.flowchart = Flowchart()
+        flow.flowchart.name = 'InitTalk'
+
+        event = Event()
+        event.name = 'Event0'
+        event.data = SubFlowEvent()
+        event.data.entry_point_name = 'Talk'
+        event.data.res_flowchart_name = ''
+        flow.flowchart.events = [event]
+
+        entry_point = EntryPoint('InitTalk')
+        entry_point.main_event.v = event
+        self.assertFalse(hasattr(entry_point, 'items'))
+        flow.flowchart.entry_points = [entry_point]
+
+        view = FlowchartView.__new__(FlowchartView)
+        view.flow_data = types.SimpleNamespace(flow=flow)
+
+        payload = FlowchartView._serializeEntryPointRowsPayload(view, [0])
+
+        self.assertEqual(payload['entry_points'][0]['name'], 'InitTalk')
+        self.assertEqual(payload['entry_points'][0]['items'], {})
+        self.assertEqual(payload['events'][0]['kind'], 'sub_flow')
 
     def test_mals_prefix_matching(self):
         message_ids = {
@@ -432,6 +540,10 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn("settings.setValue('locale', self._mals_locale)", main_py)
         self.assertIn("No {self._mals_locale} Mals archive could be found", main_py)
         self.assertIn("mals.mals_file_not_found_text(self._mals_locale)", main_py)
+        self.assertIn("totk_rom_root = settings.value('paths/totk_rom_root')", main_py)
+        self.assertIn("ai.set_rom_path(totk_rom_root)", main_py)
+        self.assertIn("ai.set_rom_path(str(romfs_root))", main_py)
+        self.assertNotIn("ai.set_rom_path(settings.value('paths/rom_root'))", main_py)
         self.assertNotIn("QAction('Show &tags'", main_py)
         self.assertNotIn("'Include text tags'", main_py)
         self.assertNotIn("include_text_tags", main_py)
@@ -474,6 +586,19 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn("this._restoreRawNodeLabels(visibleGraph)", main_js)
         self.assertIn("this._fitNodeBoxesToLabels()", main_js)
         self.assertIn("shape.setAttribute('width'", main_js)
+        self.assertIn("const nextWidth = Math.max(currentWidth, fittedWidth)", main_js)
+        self.assertIn("const nextHeight = Math.max(currentHeight, fittedHeight)", main_js)
+        self.assertIn("centerY - (nextHeight / 2)", main_js)
+        self.assertIn("const GRAPH_FIT_PADDING = 40", main_js)
+        self.assertIn("const GRAPH_FIT_MAX_SCALE = 1", main_js)
+        self.assertIn("const READABLE_NODE_SCALE = 1", main_js)
+        self.assertIn("fitToContent(padding=GRAPH_FIT_PADDING)", main_js)
+        self.assertIn("availableWidth / bbox.width", main_js)
+        self.assertIn("let resetViewportOnNextLoad = true", main_js)
+        self.assertIn("graph.renderer.fitToContent()", main_js)
+        self.assertIn("graph.renderer.scrollTo(id, true, 500, READABLE_NODE_SCALE)", main_js)
+        self.assertIn("graph.renderer.scrollTo(id, true, 0, READABLE_NODE_SCALE)", main_js)
+        self.assertNotIn("graph.renderer.setTranslate([20, 20])", main_js)
         self.assertNotIn("const render = dagreD3.render()", main_js)
         self.assertIn("const dagreRenderer = dagreD3.render()", main_js)
         self.assertIn("closestNodeIdToViewportCenter", main_js)
@@ -501,6 +626,11 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn("def showOnlySelectedEntryPoints", flowchart_py)
         self.assertIn("self.flow_data.entry_point_model.isHiddenRow(source_row)", flowchart_py)
         self.assertIn("self.flow_data.entry_point_model.setRowsHidden([source_row], False)", flowchart_py)
+        self.assertIn('def _copyEntryPointItems(self, entry_point: EntryPoint)', flowchart_py)
+        self.assertIn("getattr(entry_point, 'items', {})", flowchart_py)
+        self.assertIn('def _setEntryPointItems(self, entry_point: EntryPoint, items:', flowchart_py)
+        self.assertIn("self._setEntryPointItems(entry_point, entry_payload.get('items', {}))", flowchart_py)
+        self.assertIn("q.QMessageBox.critical(self, 'Copy entry points'", flowchart_py)
         self.assertIn("self.web_object.preserveViewportRequested.emit()", flowchart_py)
         self.assertIn("self._launchNewInstanceForPath(path, entry_point_name=entry_point_name)", main_py)
         self.assertIn("parser.add_argument('--entry-point'", main_py)
@@ -511,6 +641,110 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn('$appBundleName = "TOTK Event Editor $releaseVersion"', workflow)
         self.assertIn('--name "$env:APP_BUNDLE_NAME"', workflow)
         self.assertIn('Compress-Archive -Path "dist/$env:APP_BUNDLE_NAME/*"', workflow)
+
+    def test_event_chooser_headers_sort_ascending_then_descending(self):
+        source_root = Path(__file__).resolve().parents[1] / 'eventeditor'
+        event_view_py = (source_root / 'event_view.py').read_text(encoding='utf-8')
+        event_chooser_py = (source_root / 'event_chooser_dialog.py').read_text(encoding='utf-8')
+        actor_view_py = (source_root / 'actor_view.py').read_text(encoding='utf-8')
+        container_view_py = (source_root / 'container_view.py').read_text(encoding='utf-8')
+        container_model_py = (source_root / 'container_model.py').read_text(encoding='utf-8')
+        event_branch_editors_py = (source_root / 'event_branch_editors.py').read_text(encoding='utf-8')
+        event_edit_dialog_py = (source_root / 'event_edit_dialog.py').read_text(encoding='utf-8')
+        sortable_proxy_model_py = (source_root / 'sortable_proxy_model.py').read_text(encoding='utf-8')
+        ai_py = (source_root / 'ai.py').read_text(encoding='utf-8')
+
+        self.assertIn('class SortableHeaderProxyModel(qc.QSortFilterProxyModel):', sortable_proxy_model_py)
+        self.assertIn("return f'{value} ({self._sort_descriptor_text})'", sortable_proxy_model_py)
+        self.assertIn('enable_sorting: bool=True', event_view_py)
+        self.assertIn('enable_sorting=True', event_chooser_py)
+        self.assertIn('self.event_proxy_model = SortableHeaderProxyModel(self)', event_view_py)
+        self.assertIn('self.event_proxy_model.setSortCaseSensitivity(qc.Qt.CaseInsensitive)', event_view_py)
+        self.assertIn('self.event_view.horizontalHeader().sectionClicked.connect(self.onHeaderClicked)', event_view_py)
+        self.assertIn('if self._sort_column == section and self._sort_order == qc.Qt.AscendingOrder:', event_view_py)
+        self.assertIn('self._sort_order = qc.Qt.DescendingOrder', event_view_py)
+        self.assertIn('self._sort_order = qc.Qt.AscendingOrder', event_view_py)
+        self.assertIn("self.event_proxy_model.setSortDescriptor(section, 'Z-A' if self._sort_order == qc.Qt.DescendingOrder else 'A-Z')", event_view_py)
+        self.assertIn('self.event_proxy_model.sort(section, self._sort_order)', event_view_py)
+        self.assertIn('self.actor_proxy_model = SortableHeaderProxyModel(self)', actor_view_py)
+        self.assertIn('self.actor_view.horizontalHeader().sectionClicked.connect(self.onActorHeaderClicked)', actor_view_py)
+        self.assertIn('if self.actor_sort_column == section and self.actor_sort_order == qc.Qt.AscendingOrder:', actor_view_py)
+        self.assertIn("self.actor_proxy_model.setSortDescriptor(section, 'Z-A' if self.actor_sort_order == qc.Qt.DescendingOrder else 'A-Z')", actor_view_py)
+        self.assertIn('self.actor_proxy_model.sort(section, self.actor_sort_order)', actor_view_py)
+        self.assertIn('self._mapActorIndexToSource(idx)', actor_view_py)
+        self.assertIn('self.proxy_model = SortableHeaderProxyModel(self)', container_view_py)
+        self.assertIn('hheader.sectionClicked.connect(self.onHeaderClicked)', container_view_py)
+        self.assertIn("descriptor = 'A-Z'", container_view_py)
+        self.assertIn("descriptor = 'Z-A'", container_view_py)
+        self.assertIn('elif section == ContainerModelColumn.Key:', container_view_py)
+        self.assertIn("descriptor = 'File'", container_view_py)
+        self.assertIn('self.proxy_model.setSortDescriptor(section, descriptor)', container_view_py)
+        self.assertIn('self.proxy_model.sort(sort_column, self.sort_order)', container_view_py)
+        self.assertIn('idx = self._mapIndexToSource(smodel.selectedIndexes()[0])', container_view_py)
+        self.assertIn('show_json_tools=False', container_view_py)
+        self.assertIn('if show_json_tools:', container_view_py)
+        self.assertNotIn('autofillRequested', container_view_py)
+        self.assertNotIn('reorderRequested', container_view_py)
+        self.assertNotIn("QPushButton('Auto fill')", container_view_py)
+        self.assertNotIn("QPushButton('Reorder')", container_view_py)
+        self.assertNotIn('def prompt_file_suffix_action', container_model_py)
+        self.assertNotIn('Cancel keeps editing.', container_model_py)
+        self.assertNotIn('editCancelled', container_model_py)
+        self.assertNotIn('_file_suffix_prompt_active', container_model_py)
+        self.assertNotIn('def strip_message_id_file_suffix(value: str)', container_model_py)
+        self.assertNotIn('def strip_file_suffix(value: str)', container_model_py)
+        self.assertNotIn('ContainerItemDelegate', container_view_py)
+        self.assertIn('util.set_view_delegate(self.tview)', container_view_py)
+        self.assertIn('def sort(self, column: int, order: qc.Qt.SortOrder = qc.Qt.AscendingOrder) -> None:', event_branch_editors_py)
+        self.assertIn("return f'{text} ({self._sort_descriptor_text})'", event_branch_editors_py)
+        self.assertIn('self.tview.horizontalHeader().sectionClicked.connect(self.onHeaderClicked)', event_branch_editors_py)
+        self.assertIn("self.model.setSortDescriptor(section, 'Z-A' if self.sort_order == qc.Qt.DescendingOrder else 'A-Z')", event_branch_editors_py)
+        self.assertIn('self.model.sort(section, self.sort_order)', event_branch_editors_py)
+        self.assertIn('show_json_tools=True', event_edit_dialog_py)
+        self.assertIn('self.param_view.copyJsonRequested.connect(self.onCopyJsonRequested)', event_edit_dialog_py)
+        self.assertIn('self.param_view.pasteJsonRequested.connect(self.onPasteJsonRequested)', event_edit_dialog_py)
+        self.assertIn("self.flowchart_ledit.setPlaceholderText(f'{self.flow_data.flow.name} (edit to specify an external flowchart)')", event_edit_dialog_py)
+        self.assertNotIn('self.flowchart_ledit.editingFinished.connect(self.normalizeFlowchartName)', event_edit_dialog_py)
+        self.assertNotIn('def normalizeFlowchartName(self)', event_edit_dialog_py)
+        self.assertIn('def prompt_node_property_period_warning', event_edit_dialog_py)
+        self.assertIn('One or more paths to external files contains a period.', event_edit_dialog_py)
+        self.assertIn('Note that file extensions, like .msbt or .evfl, are not required.', event_edit_dialog_py)
+        self.assertIn("details = q.QLabel('\\n\\n'.join(_format_period_finding(finding) for finding in findings))", event_edit_dialog_py)
+        self.assertIn('details.setTextFormat(qc.Qt.PlainText)', event_edit_dialog_py)
+        self.assertIn('details.setTextInteractionFlags(qc.Qt.TextSelectableByMouse)', event_edit_dialog_py)
+        self.assertNotIn('QPlainTextEdit', event_edit_dialog_py)
+        self.assertNotIn('FixedFont', event_edit_dialog_py)
+        self.assertIn("q.QPushButton('Go back')", event_edit_dialog_py)
+        self.assertIn("q.QPushButton('Ignore')", event_edit_dialog_py)
+        self.assertIn('def handlePeriodsBeforeClose(self) -> str:', event_edit_dialog_py)
+        self.assertIn('self.handlePeriodsBeforeClose()', event_edit_dialog_py)
+        self.assertNotIn("q.QPushButton('Keep As-Is'", event_edit_dialog_py)
+        self.assertNotIn("q.QPushButton('Close Anyway')", event_edit_dialog_py)
+        self.assertNotIn("q.QPushButton('Remove File Suffixes')", event_edit_dialog_py)
+        self.assertNotIn('def applyFileSuffixRemovals', event_edit_dialog_py)
+        self.assertNotIn('Proposed:', event_edit_dialog_py)
+        self.assertIn('PARAMETER_CLIPBOARD_MIME_TYPE', event_edit_dialog_py)
+        self.assertIn('def set_parameter_clipboard', event_edit_dialog_py)
+        self.assertIn('def get_parameter_clipboard', event_edit_dialog_py)
+        self.assertIn('def confirm_parameter_paste_node_type', event_edit_dialog_py)
+        self.assertIn('q.QMessageBox.Ok | q.QMessageBox.Cancel', event_edit_dialog_py)
+        self.assertIn('This is rarely intentional. Continue?', event_edit_dialog_py)
+        self.assertIn('def parameterClipboardNodeType(self)', event_edit_dialog_py)
+        self.assertIn('confirm_parameter_paste_node_type(self, source_node_type, self.parameterClipboardNodeType())', event_edit_dialog_py)
+        self.assertIn("confirm_parameter_paste_node_type(self, source_node_type, 'subflow')", event_edit_dialog_py)
+        self.assertNotIn('Flowchart name (optional)', event_edit_dialog_py)
+        self.assertNotIn('Note: this flowchart', event_edit_dialog_py)
+        self.assertNotIn('<self> (edit to specify an external flowchart)', event_edit_dialog_py)
+        self.assertNotIn('has_autofill_btn=True', event_edit_dialog_py)
+        self.assertNotIn('onAutofillRequested', event_edit_dialog_py)
+        self.assertNotIn('onReorderRequested', event_edit_dialog_py)
+        self.assertNotIn('autofillRequested', event_edit_dialog_py)
+        self.assertNotIn('reorderRequested', event_edit_dialog_py)
+        self.assertNotIn('COMMON_EVENT_PARAMETER_ORDER', event_edit_dialog_py)
+        self.assertIn('def clear_cached_metadata() -> None:', ai_py)
+        self.assertIn('load_aiprog.cache_clear()', ai_py)
+        self.assertIn('ai_def_instance.clear()', ai_py)
+        self.assertIn('def clear(self) -> None:', ai_py)
 
     def test_plain_and_gzip_flow_roundtrip(self):
         flow = EventFlow()

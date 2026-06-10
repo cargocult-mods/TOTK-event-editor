@@ -7,7 +7,7 @@ let actionsProhibited = false;
 let isDeleting = false;
 let suppressNextViewportAdjustment = false;
 let hasHiddenEntryPoints = false;
-let resetViewportOnNextLoad = false;
+let resetViewportOnNextLoad = true;
 let preservedViewport = null;
 let preservedFocusNodeId = null;
 let preservedFocusPoint = null;
@@ -26,6 +26,9 @@ let showMessageBubbleBreaks = true;
 const LABEL_WRAP_LENGTH = 44;
 const MESSAGE_WRAP_LENGTH = 62;
 const MESSAGE_BUBBLE_SOURCE_LINE_LIMIT = 3;
+const GRAPH_FIT_PADDING = 40;
+const GRAPH_FIT_MAX_SCALE = 1;
+const READABLE_NODE_SCALE = 1;
 const MESSAGE_SEPARATOR = '-'.repeat(30);
 const MESSAGE_BLANK_LINE = '\u00A0';
 const MESSAGE_BUBBLE_BREAK_LINE = '\u2063';
@@ -562,11 +565,11 @@ function getElementCenterInViewport(element) {
 function rerenderAroundCurrentNode(preferredNodeId) {
   const currentViewport = graph.renderer.getViewport();
   const targetNodeId = preferredNodeId != null ? preferredNodeId : graph.renderer.getSelection();
-  graph.refresh();
+    graph.refresh();
   graph.render(0);
   setTimeout(() => {
     if (targetNodeId != null && targetNodeId !== -1 && graph.renderer.getElement(targetNodeId)) {
-      graph.renderer.scrollTo(targetNodeId, true, 0);
+      graph.renderer.scrollTo(targetNodeId, true, 0, READABLE_NODE_SCALE);
     } else {
       graph.renderer.restoreViewport(currentViewport);
     }
@@ -921,10 +924,20 @@ class Renderer {
 
       const padX = 10;
       const padY = 8;
-      shape.setAttribute('x', `${Math.floor(bbox.x - padX)}`);
-      shape.setAttribute('y', `${Math.floor(bbox.y - padY)}`);
-      shape.setAttribute('width', `${Math.ceil(bbox.width + (padX * 2))}`);
-      shape.setAttribute('height', `${Math.ceil(bbox.height + (padY * 2))}`);
+      const currentX = parseFloat(shape.getAttribute('x')) || 0;
+      const currentY = parseFloat(shape.getAttribute('y')) || 0;
+      const currentWidth = parseFloat(shape.getAttribute('width')) || 0;
+      const currentHeight = parseFloat(shape.getAttribute('height')) || 0;
+      const centerX = currentX + (currentWidth / 2);
+      const centerY = currentY + (currentHeight / 2);
+      const fittedWidth = Math.ceil(bbox.width + (padX * 2));
+      const fittedHeight = Math.ceil(bbox.height + (padY * 2));
+      const nextWidth = Math.max(currentWidth, fittedWidth);
+      const nextHeight = Math.max(currentHeight, fittedHeight);
+      shape.setAttribute('x', `${Math.floor(centerX - (nextWidth / 2))}`);
+      shape.setAttribute('y', `${Math.floor(centerY - (nextHeight / 2))}`);
+      shape.setAttribute('width', `${nextWidth}`);
+      shape.setAttribute('height', `${nextHeight}`);
     });
   }
 
@@ -1245,6 +1258,50 @@ class Renderer {
     return true;
   }
 
+  fitToContent(padding=GRAPH_FIT_PADDING) {
+    const svgNode = this.svg.node();
+    const groupNode = this.svgGroup.node();
+    if (!svgNode || !groupNode) {
+      return false;
+    }
+
+    let bbox;
+    try {
+      bbox = groupNode.getBBox();
+    } catch (error) {
+      return false;
+    }
+
+    const svgWidth = svgNode.clientWidth || window.innerWidth;
+    const svgHeight = svgNode.clientHeight || window.innerHeight;
+    if (!bbox || bbox.width <= 0 || bbox.height <= 0 || svgWidth <= 0 || svgHeight <= 0) {
+      this.zoom.scale(1);
+      this.zoom.translate([padding / 2, padding / 2]);
+      this.updateTransform();
+      return false;
+    }
+
+    const availableWidth = Math.max(1, svgWidth - (padding * 2));
+    const availableHeight = Math.max(1, svgHeight - (padding * 2));
+    const scale = Math.min(
+      GRAPH_FIT_MAX_SCALE,
+      availableWidth / bbox.width,
+      availableHeight / bbox.height
+    );
+    const graphCenterX = bbox.x + (bbox.width / 2);
+    const graphCenterY = bbox.y + (bbox.height / 2);
+    const nextTranslate = [
+      (svgWidth / 2) - (graphCenterX * scale),
+      (svgHeight / 2) - (graphCenterY * scale),
+    ];
+
+    this.svg.interrupt();
+    this.zoom.scale(scale);
+    this.zoom.translate(nextTranslate);
+    this.updateTransform();
+    return true;
+  }
+
   render(g, transitionMs=GRAPH_TRANSITION_MS) {
     const visibleGraph = new graphlib.Graph({ multigraph: true });
     visibleGraph.setGraph({});
@@ -1426,9 +1483,9 @@ class Graph {
     }
     this.render();
     if (v != null && this.renderer.getElement(v)) {
-      setTimeout(() => this.renderer.scrollTo(v), 500);
+      setTimeout(() => this.renderer.scrollTo(v, true, 500, READABLE_NODE_SCALE), 500);
     } else if (selected !== -1 && this.renderer.getElement(selected)) {
-      setTimeout(() => this.renderer.scrollTo(selected), 500);
+      setTimeout(() => this.renderer.scrollTo(selected, true, 500, READABLE_NODE_SCALE), 500);
     }
   }
 
@@ -1744,7 +1801,7 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
       graph.renderer.select(id, graph.g);
     } else {
       graph.renderer.select(id, graph.g);
-      graph.renderer.scrollTo(id);
+      graph.renderer.scrollTo(id, true, 500, READABLE_NODE_SCALE);
     }
   }
 
@@ -1754,7 +1811,7 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
       graph.render();
     }
     graph.renderer.select(id, graph.g);
-    graph.renderer.scrollTo(id, true, 500);
+    graph.renderer.scrollTo(id, true, 500, READABLE_NODE_SCALE);
   }
 
   function load(cb) {
@@ -1786,7 +1843,7 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
           }
         }
         if (resetViewportOnNextLoad) {
-          graph.renderer.setTranslate([20, 20]);
+          graph.renderer.fitToContent();
           resetViewportOnNextLoad = false;
         }
         widget.emitReloadedSignal();
@@ -1829,7 +1886,7 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
       graph.render(0);
     }
     graph.renderer.select(id, graph.g);
-    graph.renderer.scrollTo(id, true, 0);
+    graph.renderer.scrollTo(id, true, 0, READABLE_NODE_SCALE);
   });
 
   widget.preserveViewportRequested.connect(() => {

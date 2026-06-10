@@ -2,8 +2,12 @@ from enum import IntEnum, auto
 import typing
 import yaml
 
-from eventeditor.container_model import ContainerModel, ContainerModelColumn
+from eventeditor.container_model import (
+    ContainerModel,
+    ContainerModelColumn,
+)
 from eventeditor.data_editors import CustomTableView
+from eventeditor.sortable_proxy_model import SortableHeaderProxyModel
 import eventeditor.util as util
 from evfl import ActorIdentifier, Argument, Container
 import PyQt5.QtCore as qc # type: ignore
@@ -144,22 +148,27 @@ class ContainerAddItemDialog(q.QDialog):
         super().accept()
 
 class ContainerView(q.QWidget):
-    autofillRequested = qc.pyqtSignal()
-    reorderRequested = qc.pyqtSignal()
     copyJsonRequested = qc.pyqtSignal()
     pasteJsonRequested = qc.pyqtSignal()
 
-    def __init__(self, parent, model: ContainerModel, flow_data, has_autofill_btn=False) -> None:
+    def __init__(self, parent, model: ContainerModel, flow_data, show_json_tools=False) -> None:
         super().__init__(parent)
         self.flow_data = flow_data
         self.action_builders = [] # type: ignore
         self.model: ContainerModel = model
+        self.sort_column: typing.Optional[int] = None
+        self.sort_order = qc.Qt.AscendingOrder
+        self.sort_state = 'file'
+        self.proxy_model = SortableHeaderProxyModel(self)
+        self.proxy_model.setSourceModel(self.model)
+        self.proxy_model.setSortCaseSensitivity(qc.Qt.CaseInsensitive)
+        self.proxy_model.setDynamicSortFilter(True)
 
         self.tview = CustomTableView()
         font = qg.QFont()
         font.setPointSize(max(int(font.pointSize() * 0.85), 9))
         self.tview.setFont(font)
-        self.tview.setModel(self.model)
+        self.tview.setModel(self.proxy_model)
         self.tview.verticalHeader().hide()
         self.tview.verticalHeader().setSectionResizeMode(q.QHeaderView.ResizeToContents)
         self.tview.setSelectionMode(q.QAbstractItemView.SingleSelection)
@@ -167,6 +176,9 @@ class ContainerView(q.QWidget):
         hheader.setSectionResizeMode(q.QHeaderView.ResizeToContents)
         hheader.setSectionResizeMode(ContainerModelColumn.Value, q.QHeaderView.Stretch)
         hheader.setMinimumSectionSize(50)
+        hheader.setSectionsClickable(True)
+        hheader.setSortIndicatorShown(False)
+        hheader.sectionClicked.connect(self.onHeaderClicked)
         self.tview.setContextMenuPolicy(qc.Qt.CustomContextMenu)
         self.tview.customContextMenuRequested.connect(self.onContextMenu)
         util.set_view_delegate(self.tview)
@@ -174,12 +186,6 @@ class ContainerView(q.QWidget):
         self.add_btn = q.QPushButton('Add...')
         self.add_btn.setStyleSheet('padding: 2px 5px;')
         self.add_btn.clicked.connect(self.onAdd)
-        self.autofill_btn = q.QPushButton('Auto fill')
-        self.autofill_btn.setStyleSheet('padding: 2px 5px;')
-        self.autofill_btn.clicked.connect(self.autofillRequested)
-        self.reorder_btn = q.QPushButton('Reorder')
-        self.reorder_btn.setStyleSheet('padding: 2px 5px;')
-        self.reorder_btn.clicked.connect(self.reorderRequested)
         self.copy_btn = q.QPushButton('Copy JSON')
         self.copy_btn.setStyleSheet('padding: 2px 5px;')
         self.copy_btn.clicked.connect(self.copyJsonRequested)
@@ -190,11 +196,9 @@ class ContainerView(q.QWidget):
         label = q.QLabel('Parameters')
         label.setStyleSheet('font-weight: bold;')
         self.header_box.addWidget(label, stretch=1)
-        if has_autofill_btn:
+        if show_json_tools:
             self.header_box.addWidget(self.copy_btn)
             self.header_box.addWidget(self.paste_btn)
-            self.header_box.addWidget(self.reorder_btn)
-            self.header_box.addWidget(self.autofill_btn)
         self.header_box.addWidget(self.add_btn)
 
         layout = q.QVBoxLayout(self)
@@ -213,19 +217,65 @@ class ContainerView(q.QWidget):
         dialog.exec_()
 
     def onRemove(self, idx) -> None:
-        self.model.removeRow(idx.row())
+        source_idx = self._mapIndexToSource(idx)
+        if source_idx.isValid():
+            self.model.removeRow(source_idx.row())
 
     def onConvertToArgument(self, idx) -> None:
-        self.model.changeTypeToArgument(idx.row())
+        source_idx = self._mapIndexToSource(idx)
+        if source_idx.isValid():
+            self.model.changeTypeToArgument(source_idx.row())
 
     def addActionBuilder(self, fn) -> None:
         self.action_builders.append(fn)
+
+    def _mapIndexToSource(self, idx: qc.QModelIndex) -> qc.QModelIndex:
+        if not idx.isValid():
+            return qc.QModelIndex()
+        if idx.model() is self.proxy_model:
+            return self.proxy_model.mapToSource(idx)
+        return idx
+
+    def onHeaderClicked(self, section: int) -> None:
+        if self.sort_column != section or self.sort_state == 'file':
+            self.sort_column = section
+            self.sort_order = qc.Qt.AscendingOrder
+            self.sort_state = 'asc'
+            descriptor = 'A-Z'
+            sort_column = section
+            show_indicator = True
+        elif self.sort_state == 'asc':
+            self.sort_order = qc.Qt.DescendingOrder
+            self.sort_state = 'desc'
+            descriptor = 'Z-A'
+            sort_column = section
+            show_indicator = True
+        elif section == ContainerModelColumn.Key:
+            self.sort_state = 'file'
+            self.sort_order = qc.Qt.AscendingOrder
+            descriptor = 'File'
+            sort_column = -1
+            show_indicator = False
+        else:
+            self.sort_order = qc.Qt.AscendingOrder
+            self.sort_state = 'asc'
+            descriptor = 'A-Z'
+            sort_column = section
+            show_indicator = True
+
+        header = self.tview.horizontalHeader()
+        header.setSortIndicator(section, self.sort_order)
+        header.setSortIndicatorShown(show_indicator)
+        self.proxy_model.setSortDescriptor(section, descriptor)
+        self.proxy_model.sort(sort_column, self.sort_order)
 
     def onContextMenu(self, pos) -> None:
         smodel = self.tview.selectionModel()
         if not smodel.selectedIndexes():
             return
-        idx = smodel.selectedIndexes()[0]
+        idx = self._mapIndexToSource(smodel.selectedIndexes()[0])
+        if not idx.isValid():
+            return
         menu = q.QMenu()
         menu.addAction('Convert to &argument', lambda: self.onConvertToArgument(idx))
         menu.addAction('&Delete item', lambda: self.onRemove(idx))

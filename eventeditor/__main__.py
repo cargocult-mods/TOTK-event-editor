@@ -1280,8 +1280,9 @@ class MainWindow(q.QMainWindow):
 
     def readSettings(self) -> None:
         settings = qc.QSettings()
-        ai.set_rom_path(settings.value('paths/rom_root'))
-        totk_zs.set_romfs_path(settings.value('paths/totk_rom_root') or settings.value('paths/rom_root'))
+        totk_rom_root = settings.value('paths/totk_rom_root')
+        ai.set_rom_path(totk_rom_root)
+        totk_zs.set_romfs_path(totk_rom_root)
         aj.set_actor_definitions_path(settings.value('paths/actor_definitions_root'))
         settings.beginGroup('MainWindow')
         self.resize(settings.value('size', qc.QSize(800, 600)))
@@ -1722,6 +1723,7 @@ class MainWindow(q.QMainWindow):
             return False
 
         totk_zs.set_romfs_path(str(romfs_root))
+        ai.set_rom_path(str(romfs_root))
         settings = qc.QSettings()
         settings.beginGroup('paths')
         settings.setValue('totk_rom_root', str(romfs_root))

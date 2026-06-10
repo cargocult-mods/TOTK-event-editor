@@ -4,6 +4,7 @@ import typing
 from eventeditor.event_edit_dialog import show_event_editor
 from eventeditor.event_model import EventModelColumn
 from eventeditor.search_bar import SearchBar
+from eventeditor.sortable_proxy_model import SortableHeaderProxyModel
 from evfl import Event, EventFlow
 import PyQt5.QtCore as qc # type: ignore
 import PyQt5.QtGui as qg # type: ignore
@@ -21,17 +22,22 @@ class _TableWidget(q.QTableView):
 class EventView(q.QWidget):
     jumpToFlowchartRequested = qc.pyqtSignal(int)
 
-    def __init__(self, parent, flow_data, enable_ctx_menu: bool=True) -> None:
+    def __init__(self, parent, flow_data, enable_ctx_menu: bool=True, enable_sorting: bool=True) -> None:
         super().__init__(parent)
         self.flow_data = flow_data
         self.enable_ctx_menu = enable_ctx_menu
+        self.enable_sorting = enable_sorting
+        self._sort_column: typing.Optional[int] = None
+        self._sort_order = qc.Qt.AscendingOrder
         self.initWidgets()
         self.initLayout()
         self.connectWidgets()
 
     def initWidgets(self) -> None:
-        self.event_proxy_model = qc.QSortFilterProxyModel(self)
+        self.event_proxy_model = SortableHeaderProxyModel(self)
         self.event_proxy_model.setSourceModel(self.flow_data.event_model)
+        self.event_proxy_model.setSortCaseSensitivity(qc.Qt.CaseInsensitive)
+        self.event_proxy_model.setDynamicSortFilter(True)
         self.event_view = _TableWidget()
         self.event_view.setModel(self.event_proxy_model)
         self.event_view.verticalHeader().hide()
@@ -43,6 +49,9 @@ class EventView(q.QWidget):
         self.event_view.horizontalHeader().setSectionResizeMode(2, q.QHeaderView.Stretch)
         self.event_view.horizontalHeader().setSectionResizeMode(3, q.QHeaderView.ResizeToContents)
         self.event_view.horizontalHeader().setSectionResizeMode(4, q.QHeaderView.Stretch)
+        if self.enable_sorting:
+            self.event_view.horizontalHeader().setSectionsClickable(True)
+            self.event_view.horizontalHeader().setSortIndicatorShown(False)
 
         if self.enable_ctx_menu:
             self.event_view.setContextMenuPolicy(qc.Qt.CustomContextMenu)
@@ -64,6 +73,21 @@ class EventView(q.QWidget):
 
         self.event_view.onEnterPressed.connect(self.onEnterPressed)
         self.event_view.doubleClicked.connect(lambda idx: self.jumpToFlowchartRequested.emit(self.event_proxy_model.mapToSource(idx).row()))
+        if self.enable_sorting:
+            self.event_view.horizontalHeader().sectionClicked.connect(self.onHeaderClicked)
+
+    def onHeaderClicked(self, section: int) -> None:
+        if self._sort_column == section and self._sort_order == qc.Qt.AscendingOrder:
+            self._sort_order = qc.Qt.DescendingOrder
+        else:
+            self._sort_column = section
+            self._sort_order = qc.Qt.AscendingOrder
+
+        header = self.event_view.horizontalHeader()
+        header.setSortIndicator(section, self._sort_order)
+        header.setSortIndicatorShown(True)
+        self.event_proxy_model.setSortDescriptor(section, 'Z-A' if self._sort_order == qc.Qt.DescendingOrder else 'A-Z')
+        self.event_proxy_model.sort(section, self._sort_order)
 
     def getSelectedEventIdx(self) -> typing.Optional[qc.QModelIndex]:
         smodel = self.event_view.selectionModel()

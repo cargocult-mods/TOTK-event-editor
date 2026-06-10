@@ -119,7 +119,7 @@ class EventChooserDialog(q.QDialog):
         self.setMinimumHeight(250)
         self.flow_data = flow_data
 
-        self.event_view = EventView(None, self.flow_data, enable_ctx_menu)
+        self.event_view = EventView(None, self.flow_data, enable_ctx_menu, enable_sorting=True)
 
         add_event_box = q.QHBoxLayout()
         add_event_btn = q.QPushButton('Add event...')
