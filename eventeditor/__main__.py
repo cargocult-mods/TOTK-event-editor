@@ -1058,6 +1058,10 @@ class MainWindow(q.QMainWindow):
 
     def eventFilter(self, watched, event):
         event_type = event.type()
+        if watched == self.menuBar() and event_type in (qc.QEvent.Resize, qc.QEvent.Show):
+            self.positionUpdateAvailableButton()
+            return super().eventFilter(watched, event)
+
         if event_type in (qc.QEvent.DragEnter, qc.QEvent.DragMove, qc.QEvent.Drop):
             if not isinstance(watched, q.QWidget):
                 return super().eventFilter(watched, event)
@@ -1265,11 +1269,6 @@ QToolButton:hover, QToolButton:pressed {
 
     def about(self) -> None:
         q.QMessageBox.about(self, f'About {APP_DISPLAY_NAME}', build_about_html(self._version))
-
-    def eventFilter(self, watched: qc.QObject, event: qc.QEvent) -> bool:
-        if watched == self.menuBar() and event.type() in (qc.QEvent.Resize, qc.QEvent.Show):
-            self.positionUpdateAvailableButton()
-        return super().eventFilter(watched, event)
 
     def positionUpdateAvailableButton(self) -> None:
         if not hasattr(self, 'update_available_button'):
