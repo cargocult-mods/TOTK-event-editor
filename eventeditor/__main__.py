@@ -1,12 +1,15 @@
 import argparse
 import io
+import json
 import os
 from pathlib import Path
 import re
 import signal
 import sys
+import threading
 import traceback
 import typing
+import urllib.request
 
 import evfl
 from evfl import EventFlow
@@ -29,8 +32,15 @@ APP_DISPLAY_NAME = 'TOTK EventEditor'
 APP_INTERNAL_NAME = 'eventeditor'
 GITHUB_REPOSITORY_SLUG = 'cargocult-mods/TOTK-event-editor'
 GITHUB_REPOSITORY_URL = f'https://github.com/{GITHUB_REPOSITORY_SLUG}'
+GITHUB_RELEASES_URL = f'{GITHUB_REPOSITORY_URL}/releases'
+GITHUB_LATEST_RELEASE_API_URL = f'https://api.github.com/repos/{GITHUB_REPOSITORY_SLUG}/releases/latest'
 UPSTREAM_REPOSITORY_URL = 'https://github.com/zeldamods/event-editor'
 RELEASE_VERSION_ASSET = 'assets/release_version.txt'
+UPDATE_SUMMARY_START = '<!-- update-summary:start -->'
+UPDATE_SUMMARY_END = '<!-- update-summary:end -->'
+UPDATE_CHECK_TIMEOUT_SECONDS = 5
+UPDATE_SETTINGS_GROUP = 'updates'
+DISMISSED_UPDATE_VERSION_KEY = 'dismissed_update_version'
 
 DARK_THEME_STYLESHEET = '''
 QWidget {
@@ -733,6 +743,81 @@ def get_display_version() -> str:
         return packaged_version
     return normalize_display_version(_version.get_versions().get('version'))
 
+def parse_release_version(version: typing.Optional[str]) -> typing.Optional[typing.Tuple[int, ...]]:
+    if not version:
+        return None
+    match = re.search(r'v?(\d+(?:\.\d+){0,3})', str(version))
+    if not match:
+        return None
+    return tuple(int(part) for part in match.group(1).split('.'))
+
+def is_newer_release_version(latest_version: typing.Optional[str], current_version: typing.Optional[str]) -> bool:
+    latest = parse_release_version(latest_version)
+    current = parse_release_version(current_version)
+    if not latest or not current:
+        return False
+    width = max(len(latest), len(current))
+    latest += (0,) * (width - len(latest))
+    current += (0,) * (width - len(current))
+    return latest > current
+
+def normalize_release_tag(tag: typing.Optional[str]) -> str:
+    return str(tag or '').strip()
+
+def _clean_release_summary_line(line: str) -> str:
+    line = line.strip()
+    if not line:
+        return ''
+    if line == 'Written by Codex:':
+        return ''
+    return line
+
+def extract_update_summary(release_body: typing.Optional[str], max_bullets: int=5) -> str:
+    body = release_body or ''
+    start_index = body.find(UPDATE_SUMMARY_START)
+    end_index = body.find(UPDATE_SUMMARY_END)
+    if start_index != -1 and end_index != -1 and end_index > start_index:
+        summary = body[start_index + len(UPDATE_SUMMARY_START):end_index].strip()
+        if summary:
+            return summary
+
+    lines = [_clean_release_summary_line(line) for line in body.splitlines()]
+    lines = [line for line in lines if line]
+    bullet_lines = [line for line in lines if line.startswith(('- ', '* '))]
+    if bullet_lines:
+        return "What's new:\n" + '\n'.join(bullet_lines[:max_bullets])
+    return '\n'.join(lines[:max_bullets])
+
+def build_latest_release_request(url: str=GITHUB_LATEST_RELEASE_API_URL) -> urllib.request.Request:
+    return urllib.request.Request(
+        url,
+        headers={
+            'Accept': 'application/vnd.github+json',
+            'User-Agent': APP_INTERNAL_NAME,
+        },
+    )
+
+def fetch_latest_release_info(
+    url: str=GITHUB_LATEST_RELEASE_API_URL,
+    timeout: int=UPDATE_CHECK_TIMEOUT_SECONDS,
+) -> typing.Dict[str, typing.Any]:
+    request = build_latest_release_request(url)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        data = json.loads(response.read().decode('utf-8'))
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+def build_update_info(current_version: str, release_info: typing.Dict[str, typing.Any]) -> typing.Optional[typing.Dict[str, str]]:
+    latest_version = normalize_release_tag(release_info.get('tag_name'))
+    if not is_newer_release_version(latest_version, current_version):
+        return None
+    return {
+        'version': latest_version,
+        'url': str(release_info.get('html_url') or GITHUB_RELEASES_URL),
+        'summary': extract_update_summary(release_info.get('body')),
+    }
+
 def build_about_html(version: str) -> str:
     return (
         f'<h2>{APP_DISPLAY_NAME}</h2>'
@@ -765,6 +850,9 @@ class FlowUndoCommand(q.QUndoCommand):
             self._skip_initial_redo = False
             return
         self.window.applyFlowHistorySnapshot(self.after_snapshot)
+
+class UpdateCheckSignals(qc.QObject):
+    updateAvailable = qc.pyqtSignal(dict)
 
 def build_dark_palette() -> qg.QPalette:
     palette = qg.QPalette()
@@ -823,6 +911,13 @@ class MainWindow(q.QMainWindow):
         self._include_mals_blank_lines = False
         self._show_mals_text_bubble_breaks = True
         self._startup_entry_point_name = getattr(args, 'entry_point', '') or ''
+        self._update_check_url = getattr(args, 'update_check_url', '') or GITHUB_LATEST_RELEASE_API_URL
+        self._update_check_current_version = getattr(args, 'update_check_current_version', '') or ''
+        self._update_releases_url = getattr(args, 'update_releases_url', '') or GITHUB_RELEASES_URL
+        self._update_force_reminder = bool(getattr(args, 'update_force_reminder', False))
+        self._update_check_signals = UpdateCheckSignals(self)
+        self._update_check_thread: typing.Optional[threading.Thread] = None
+        self._latest_update_info: typing.Optional[typing.Dict[str, str]] = None
 
         app = q.QApplication.instance()
         self.default_palette = qg.QPalette(app.palette()) if app else qg.QPalette()
@@ -841,9 +936,14 @@ class MainWindow(q.QMainWindow):
         self._initDragAndDrop()
 
         self.initVersionInfo()
+        self.initUpdateCheck()
 
     def initVersionInfo(self) -> None:
         self._version = get_display_version()
+
+    def initUpdateCheck(self) -> None:
+        self._update_check_signals.updateAvailable.connect(self.onUpdateAvailable)
+        qc.QTimer.singleShot(1500, self.startUpdateCheck)
 
     def _applyWindowIcon(self) -> None:
         icon_path = util.get_icon_path()
@@ -985,6 +1085,29 @@ class MainWindow(q.QMainWindow):
 
     def initMenu(self) -> None:
         menu = self.menuBar()
+        self.update_available_button = q.QToolButton(menu)
+        self.update_available_button.setText('Update available')
+        self.update_available_button.setAutoRaise(True)
+        self.update_available_button.setCursor(qg.QCursor(qc.Qt.PointingHandCursor))
+        self.update_available_button.setFocusPolicy(qc.Qt.NoFocus)
+        self.update_available_button.setToolButtonStyle(qc.Qt.ToolButtonTextOnly)
+        self.update_available_button.clicked.connect(self.openReleasesPage)
+        self.update_available_button.setStyleSheet('''
+QToolButton {
+    background: transparent;
+    border: none;
+    color: palette(window-text);
+    margin: 0;
+    padding: 0 6px;
+}
+QToolButton:hover, QToolButton:pressed {
+    background: transparent;
+    text-decoration: underline;
+}
+''')
+        self.update_available_button.setVisible(False)
+        menu.installEventFilter(self)
+        self.positionUpdateAvailableButton()
 
         file_menu = menu.addMenu('&File')
         self.new_action = q.QAction('&New...', self)
@@ -1142,6 +1265,131 @@ class MainWindow(q.QMainWindow):
 
     def about(self) -> None:
         q.QMessageBox.about(self, f'About {APP_DISPLAY_NAME}', build_about_html(self._version))
+
+    def eventFilter(self, watched: qc.QObject, event: qc.QEvent) -> bool:
+        if watched == self.menuBar() and event.type() in (qc.QEvent.Resize, qc.QEvent.Show):
+            self.positionUpdateAvailableButton()
+        return super().eventFilter(watched, event)
+
+    def positionUpdateAvailableButton(self) -> None:
+        if not hasattr(self, 'update_available_button'):
+            return
+        menu = self.menuBar()
+        margin = 4
+        width = self.update_available_button.fontMetrics().horizontalAdvance('Update available') + 16
+        height = max(menu.height(), self.update_available_button.sizeHint().height())
+        x = max(0, menu.width() - width - margin)
+        self.update_available_button.setGeometry(x, 0, width, height)
+        self.update_available_button.raise_()
+
+    def openReleasesPage(self) -> None:
+        qg.QDesktopServices.openUrl(qc.QUrl(self._update_releases_url))
+
+    def dismissedUpdateVersion(self) -> str:
+        settings = qc.QSettings()
+        settings.beginGroup(UPDATE_SETTINGS_GROUP)
+        version = settings.value(DISMISSED_UPDATE_VERSION_KEY, '', type=str)
+        settings.endGroup()
+        return normalize_release_tag(version)
+
+    def isUpdateReminderDismissed(self, update_info: typing.Dict[str, str]) -> bool:
+        version = normalize_release_tag(update_info.get('version'))
+        return bool(version and version == self.dismissedUpdateVersion())
+
+    def dismissUpdateReminder(self, update_info: typing.Dict[str, str]) -> None:
+        version = normalize_release_tag(update_info.get('version'))
+        if not version:
+            return
+        settings = qc.QSettings()
+        settings.beginGroup(UPDATE_SETTINGS_GROUP)
+        settings.setValue(DISMISSED_UPDATE_VERSION_KEY, version)
+        settings.endGroup()
+
+    def startUpdateCheck(self) -> None:
+        current_version = self._update_check_current_version or self._version
+        if not parse_release_version(current_version):
+            return
+        if self._update_check_thread and self._update_check_thread.is_alive():
+            return
+        self._update_check_thread = threading.Thread(target=self._runUpdateCheck, daemon=True)
+        self._update_check_thread.start()
+
+    def _runUpdateCheck(self) -> None:
+        try:
+            release_info = fetch_latest_release_info(self._update_check_url)
+            current_version = self._update_check_current_version or self._version
+            update_info = build_update_info(current_version, release_info)
+        except Exception:
+            return
+        if update_info:
+            self._update_check_signals.updateAvailable.emit(update_info)
+
+    def onUpdateAvailable(self, update_info: typing.Dict[str, str]) -> None:
+        self._latest_update_info = update_info
+        self.positionUpdateAvailableButton()
+        self.update_available_button.setVisible(True)
+        if self._update_force_reminder or not self.isUpdateReminderDismissed(update_info):
+            self.showUpdateAvailableDialog(update_info)
+
+    def showUpdateAvailableDialog(self, update_info: typing.Dict[str, str]) -> None:
+        version = update_info.get('version') or 'a new version'
+        summary = update_info.get('summary') or 'A newer version is available.'
+        dialog = q.QDialog(self)
+        dialog.setWindowTitle('Update available')
+        dialog.setModal(True)
+        dialog.setMinimumWidth(540)
+
+        layout = q.QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 18, 18, 14)
+        layout.setSpacing(14)
+
+        content_layout = q.QHBoxLayout()
+        content_layout.setSpacing(16)
+        icon_label = q.QLabel(dialog)
+        icon = self.style().standardIcon(q.QStyle.SP_MessageBoxInformation)
+        icon_label.setPixmap(icon.pixmap(32, 32))
+        icon_label.setAlignment(qc.Qt.AlignTop | qc.Qt.AlignHCenter)
+        content_layout.addWidget(icon_label, 0, qc.Qt.AlignTop)
+
+        text_layout = q.QVBoxLayout()
+        text_layout.setSpacing(10)
+        title_label = q.QLabel(f'{APP_DISPLAY_NAME} {version} is available.', dialog)
+        title_label.setWordWrap(True)
+        summary_label = q.QLabel(summary, dialog)
+        summary_label.setWordWrap(True)
+        summary_label.setMinimumWidth(420)
+        summary_label.setTextInteractionFlags(qc.Qt.TextSelectableByMouse)
+        text_layout.addWidget(title_label)
+        text_layout.addWidget(summary_label)
+        dismiss_checkbox = q.QCheckBox("I like this version, don't remind me again", dialog)
+        text_layout.addWidget(dismiss_checkbox)
+        content_layout.addLayout(text_layout, 1)
+        layout.addLayout(content_layout)
+
+        button_layout = q.QHBoxLayout()
+        button_layout.addStretch(1)
+        later_button = q.QPushButton('Not now', dialog)
+        open_button = q.QPushButton('Go to Releases', dialog)
+        later_button.setMinimumWidth(96)
+        open_button.setMinimumWidth(120)
+        button_layout.addWidget(later_button)
+        button_layout.addWidget(open_button)
+        layout.addLayout(button_layout)
+
+        clicked_button: typing.Dict[str, typing.Optional[q.QPushButton]] = {'button': None}
+
+        def close_with_button(button: q.QPushButton) -> None:
+            clicked_button['button'] = button
+            dialog.accept()
+
+        open_button.clicked.connect(lambda checked=False: close_with_button(open_button))
+        later_button.clicked.connect(lambda checked=False: close_with_button(later_button))
+
+        dialog.exec_()
+        if dismiss_checkbox.isChecked():
+            self.dismissUpdateReminder(update_info)
+        if clicked_button['button'] == open_button:
+            self.openReleasesPage()
 
     def initWidgets(self) -> None:
         self.tab_widget = q.QTabWidget(self)
@@ -2035,6 +2283,10 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(prog='eventeditor', description=f'{APP_DISPLAY_NAME}: an event flow editor')
     parser.add_argument('--entry-point', default='', help='Entry point to select after opening the event flow file')
+    parser.add_argument('--update-check-url', default='', help=argparse.SUPPRESS)
+    parser.add_argument('--update-check-current-version', default='', help=argparse.SUPPRESS)
+    parser.add_argument('--update-releases-url', default='', help=argparse.SUPPRESS)
+    parser.add_argument('--update-force-reminder', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('event_flow_file', nargs='?', help='Event flow file to open')
     args, _ = parser.parse_known_args()
     app = q.QApplication(sys.argv)

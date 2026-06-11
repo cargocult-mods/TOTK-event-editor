@@ -23,8 +23,14 @@ from eventeditor.event_edit_dialog import (
 from eventeditor.event_model import EventModel, EventModelColumn
 from eventeditor.__main__ import (
     APP_DISPLAY_NAME,
+    build_latest_release_request,
+    build_update_info,
+    extract_update_summary,
+    GITHUB_LATEST_RELEASE_API_URL,
     GITHUB_REPOSITORY_SLUG,
     GITHUB_REPOSITORY_URL,
+    GITHUB_RELEASES_URL,
+    is_newer_release_version,
     available_mals_locale_names,
     build_about_html,
     choose_mals_archive_from_directory,
@@ -44,6 +50,9 @@ from eventeditor.__main__ import (
     MALS_MODE_MANUAL,
     normalize_display_version,
     normalize_flow_save_path,
+    parse_release_version,
+    UPDATE_SUMMARY_END,
+    UPDATE_SUMMARY_START,
 )
 import eventeditor.actor_xml as actor_xml
 import eventeditor.container_xml as container_xml
@@ -59,6 +68,8 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertEqual(APP_DISPLAY_NAME, 'TOTK EventEditor')
         self.assertEqual(GITHUB_REPOSITORY_SLUG, 'cargocult-mods/TOTK-event-editor')
         self.assertEqual(GITHUB_REPOSITORY_URL, 'https://github.com/cargocult-mods/TOTK-event-editor')
+        self.assertEqual(GITHUB_RELEASES_URL, 'https://github.com/cargocult-mods/TOTK-event-editor/releases')
+        self.assertEqual(GITHUB_LATEST_RELEASE_API_URL, 'https://api.github.com/repos/cargocult-mods/TOTK-event-editor/releases/latest')
         self.assertEqual(versioneer_runtime_config.get_config().tag_prefix, 'v')
 
         about_html = build_about_html('v1.0.0')
@@ -73,6 +84,41 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertEqual(normalize_display_version('0+unknown.d20260607'), 'development build')
         self.assertEqual(normalize_display_version(None), 'development build')
         self.assertEqual(normalize_display_version('v1.0.0'), 'v1.0.0')
+
+    def test_update_check_helpers(self):
+        self.assertEqual(parse_release_version('v1.2.3'), (1, 2, 3))
+        self.assertEqual(parse_release_version('v1.2.3.post1.dev2'), (1, 2, 3))
+        self.assertIsNone(parse_release_version('development build'))
+        self.assertTrue(is_newer_release_version('v1.2.1', 'v1.2.0'))
+        self.assertTrue(is_newer_release_version('v1.10.0', 'v1.2.9'))
+        self.assertFalse(is_newer_release_version('v1.2.0', 'v1.2.0'))
+        self.assertFalse(is_newer_release_version('v1.2.0', 'development build'))
+
+        marked_body = (
+            'Long release notes\n'
+            f'{UPDATE_SUMMARY_START}\n'
+            '- Short item one\n'
+            '- Short item two\n'
+            f'{UPDATE_SUMMARY_END}\n'
+            '- Long item'
+        )
+        self.assertEqual(extract_update_summary(marked_body), '- Short item one\n- Short item two')
+
+        fallback_body = "Written by Codex:\n\nWhat's new:\n- One\n- Two\n- Three\n- Four\n- Five\n- Six\n"
+        self.assertEqual(extract_update_summary(fallback_body), "What's new:\n- One\n- Two\n- Three\n- Four\n- Five")
+
+        update_info = build_update_info('v1.2.0', {
+            'tag_name': 'v1.2.1',
+            'html_url': 'https://example.invalid/release',
+            'body': marked_body,
+        })
+        self.assertEqual(update_info['version'], 'v1.2.1')
+        self.assertEqual(update_info['url'], 'https://example.invalid/release')
+        self.assertIn('Short item one', update_info['summary'])
+
+        request = build_latest_release_request('http://127.0.0.1:9/releases/latest')
+        self.assertEqual(request.full_url, 'http://127.0.0.1:9/releases/latest')
+        self.assertEqual(request.get_header('Accept'), 'application/vnd.github+json')
 
     def test_totk_suffix_helpers(self):
         self.assertEqual(
@@ -527,9 +573,48 @@ class ReconstructedQoLTests(unittest.TestCase):
 
     def test_graph_ui_labels_and_hooks(self):
         source_root = Path(__file__).resolve().parents[1] / 'eventeditor'
+        tool_root = Path(__file__).resolve().parents[1] / 'tools'
         main_js = Path(util.get_path('assets/main.js')).read_text(encoding='utf-8')
         main_py = (source_root / '__main__.py').read_text(encoding='utf-8')
         flowchart_py = (source_root / 'flowchart_view.py').read_text(encoding='utf-8')
+        fake_update_launcher_py = (tool_root / 'launch_fake_update_test.py').read_text(encoding='utf-8')
+
+        self.assertIn('GITHUB_RELEASES_URL', main_py)
+        self.assertIn('GITHUB_LATEST_RELEASE_API_URL', main_py)
+        self.assertIn('def extract_update_summary', main_py)
+        self.assertIn('def build_latest_release_request', main_py)
+        self.assertIn('def build_update_info', main_py)
+        self.assertIn('class UpdateCheckSignals', main_py)
+        self.assertIn('self.update_available_button = q.QToolButton', main_py)
+        self.assertIn('self.update_available_button.setText(\'Update available\')', main_py)
+        self.assertIn('menu.installEventFilter(self)', main_py)
+        self.assertIn('def positionUpdateAvailableButton', main_py)
+        self.assertIn("self.update_available_button.fontMetrics().horizontalAdvance('Update available') + 16", main_py)
+        self.assertIn('self.update_available_button.setGeometry(x, 0, width, height)', main_py)
+        self.assertIn('qc.QTimer.singleShot(1500, self.startUpdateCheck)', main_py)
+        self.assertIn('threading.Thread(target=self._runUpdateCheck, daemon=True)', main_py)
+        self.assertIn('self.update_available_button.setVisible(False)', main_py)
+        self.assertIn('self.update_available_button.setVisible(True)', main_py)
+        self.assertIn('def dismissedUpdateVersion', main_py)
+        self.assertIn('def isUpdateReminderDismissed', main_py)
+        self.assertIn('def dismissUpdateReminder', main_py)
+        self.assertIn('DISMISSED_UPDATE_VERSION_KEY', main_py)
+        self.assertIn("dialog.setWindowTitle('Update available')", main_py)
+        self.assertIn('dialog.setMinimumWidth(540)', main_py)
+        self.assertIn("q.QCheckBox(\"I like this version, don't remind me again\"", main_py)
+        self.assertIn('text_layout.addWidget(dismiss_checkbox)', main_py)
+        self.assertNotIn('\n        layout.addWidget(dismiss_checkbox)', main_py)
+        self.assertIn("q.QPushButton('Not now'", main_py)
+        self.assertIn("q.QPushButton('Go to Releases'", main_py)
+        self.assertIn("parser.add_argument('--update-check-url'", main_py)
+        self.assertIn("parser.add_argument('--update-check-current-version'", main_py)
+        self.assertIn("parser.add_argument('--update-releases-url'", main_py)
+        self.assertIn("parser.add_argument('--update-force-reminder'", main_py)
+        self.assertIn('self._update_force_reminder or not self.isUpdateReminderDismissed(update_info)', main_py)
+        self.assertIn('ThreadingHTTPServer', fake_update_launcher_py)
+        self.assertIn("FAKE_LATEST_VERSION = 'v9.9.10-test'", fake_update_launcher_py)
+        self.assertIn("'--update-check-url'", fake_update_launcher_py)
+        self.assertIn("'--update-releases-url'", fake_update_launcher_py)
 
         self.assertIn("('Text', 'mals')", flowchart_py)
         self.assertNotIn('Mals text', flowchart_py)
