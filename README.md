@@ -1,6 +1,6 @@
 # TOTK EventEditor
 
-<img width="1202" height="676" alt="eventeditor2_header" src="https://github.com/user-attachments/assets/41601532-27e0-438b-bca9-29d82289c2c6" />
+<img width="1202" height="676" alt="eventeditor2_header" src="https://github.com/user-attachments/assets/ba9d0bd1-428c-424f-8043-cd229c1f5c71" />
 
 ## Downloads
 
