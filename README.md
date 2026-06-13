@@ -1,111 +1,196 @@
-# TOTK-event-editor
+# TOTK EventEditor
 
-## [Downloads](https://github.com/cargocult-mods/TOTK-event-editor/releases)
+## Downloads
 
-Maintained by [cargocult-mods](https://github.com/cargocult-mods) and [Codex](https://github.com/openai/codex).
+Download the latest release from the
+[TOTK EventEditor releases page](https://github.com/cargocult-mods/TOTK-event-editor/releases).
 
+For most users, download `TOTK-EventEditor_<version>-Windows.zip`, extract it,
+and run `TOTK EventEditor.exe` or `TOTK Event Editor <version>.exe` from the
+extracted folder.
 
-TOTK-event-editor is a maintained EventEditor fork developed around Tears of the
-Kingdom modding workflow. It keeps the original EventEditor workflow while adding
-compressed `.bfevfl.zs` handling, Mals/MSBT message text display, graph editing
-quality-of-life features, XML import/export helpers, tests, and Windows release builds.
+Linux builds may appear on some releases, but they are experimental and
+untested. The Windows zip is the supported release asset.
 
-### Credits and provenance
+## What this is
 
-This fork is based on the original open-source EventEditor project by leoetlino
-and contributors.
+TOTK EventEditor is a maintained EventEditor fork focused on Tears of the
+Kingdom event-flow modding.
 
-The user-facing QoL behavior reconstructed in this fork originated with Alciel's
-EventEditor build. Credit for the original QoL design and behavior goes to Alciel;
-this repository provides a maintained source reconstruction and public release path
-for those changes.
+EventFlow files are the game's event scripts. In TOTK, they control many of the
+things that happen during conversations, cutscenes, quest steps, shrine logic,
+shop interactions, tutorials, and other scripted moments. An EventFlow usually
+describes a flowchart: which actors are involved, which action or query each
+actor should run, which branch comes next, and what parameters are passed into
+those actions.
 
-### Setup
+It lets you open, inspect, edit, and save `.bfevfl` and `.bfevfl.zs` event flow
+files. It keeps the familiar EventEditor graph workflow while adding tools aimed
+at common TOTK modding problems: compressed event files, message preview,
+actor-aware action/query discovery, faster navigation, and release builds that
+do not require setting up Python.
 
-Install Python 3.6+ (**64 bit version**) and PyQt5, then run `pip install eventeditor`.
+## Main features
 
-### Windows executable downloads
+- Open and save TOTK `.bfevfl.zs` files, including dictionary-compressed files.
+- View flowcharts as editable node graphs.
+- Inspect actors, actions, queries, forks, joins, switches, and entry points.
+- Edit node type, actor, parameters, links, cases, and other event data.
+- See Mals/MSBT message text while working with dialogue events.
+- Browse actor-specific action/query possibilities with the Event Library.
+- Import and export XML helpers for event-flow work.
+- Drag files onto the app window to open them.
+- Use GitHub release builds on Windows without installing Python.
+- Check for updates from inside the app.
 
-Tagged releases can include a prebuilt Windows zip. Download
-`TOTK-EventEditor_<version>-Windows.zip` from the GitHub release, extract it,
-and run `TOTK Event Editor <version>.exe` from the extracted files.
+## Event Library
 
-Maintainers can create that zip from GitHub Actions by pushing a version tag:
+When editing an action or query node, click `Library...` beside the node type
+dropdown. The library helps you understand what an actor can do in EventFlow:
+which actions and queries have been found for that actor, which parameters they
+usually take, and how they have been used in known event flows.
 
-```sh
-git tag v1.3.10
-git push origin v1.3.10
-```
+This is useful both while building an event flow and while researching how the
+game normally does something. For example, it can help answer:
 
-The release workflow builds a one-folder executable package instead of a single-file
-executable because Qt WebEngine needs companion DLLs and resource files.
+- what actions are available that might help me achieve my gameplay goals?
+- how is this usually used?
+- which actions or queries does this actor seem to support?
+- what parameters should I expect to provide?
+- is there an unusual use that might explain a special case?
+- where is an example I can compare against?
 
-### Testing
+The library uses examples from the current file, the inferred current mod, and
+vanilla where available. Its vanilla data is cached so repeat lookups should be
+much faster after the first scan.
 
-To run the source tests:
+## Recommended workflow
 
-```sh
-python -m pip install -e .
-python -m unittest discover -s tests
-```
+1. Open an event flow from your mod or from an extracted TOTK RomFS.
+2. Use the graph, actor list, or entry point list to find the event you want.
+3. Edit action and query nodes normally.
+4. If you are unsure which node type or parameters are valid, open `Library...`.
+5. Use known examples to compare against the pattern you need.
+6. Save the `.bfevfl` or `.bfevfl.zs` file back into your mod.
 
-### Configuration
+## TOTK RomFS setup
 
-The configuration file is stored:
+For the best TOTK experience, EventEditor should know where your extracted TOTK
+RomFS is.
 
-* On Linux or macOS: at `~/.config/eventeditor/eventeditor.ini`
-* On Windows: at `%APPDATA%/eventeditor/eventeditor.ini`
+This is needed for dictionary-backed `.bfevfl.zs` files and for vanilla library
+scans.
 
-For dictionary-backed `.bfevfl.zs` files, EventEditor needs access to
-`Pack/ZsDic.pack.zs`. You can either open a file directly from an extracted RomFS
-tree that contains that dictionary pack or set:
+The first time you open or save a `.zs` file without the path configured,
+EventEditor will prompt you to locate `Pack/ZsDic.pack.zs`.
+
+You can also set the path manually in the config file:
 
 ```ini
 [paths]
 totk_rom_root=/path/to/totk_romfs
 ```
 
-The first time you open or save a `.zs` file without that path configured, EventEditor
-will prompt you to locate `Pack/ZsDic.pack.zs`.
+EventEditor uses this folder to find files such as:
 
-### Auto-completion
+```text
+Pack/ZsDic.pack.zs
+Event/EventFlow/*.bfevfl.zs
+Pack/Actor/*.pack.zs
+```
 
-#### Breath of the Wild
+## Configuration file
 
-In order to enable auto-completion for actors, actions, and queries, add:
+The configuration file is stored here:
+
+- Windows: `%APPDATA%/eventeditor/eventeditor.ini`
+- Linux or macOS: `~/.config/eventeditor/eventeditor.ini`
+
+## Source install
+
+Most Windows users should use the release zip instead.
+
+To run from source, install Python 3.6+ 64-bit and then install EventEditor:
+
+```sh
+python -m pip install -e .
+eventeditor
+```
+
+To run the tests:
+
+```sh
+python -m pip install -e .
+python -m unittest discover -s tests
+```
+
+## Maintainer notes
+
+Windows release builds are created by pushing a version tag:
+
+```sh
+git tag v1.3.10
+git push origin v1.3.10
+```
+
+The Windows workflow builds a one-folder executable package rather than a
+single-file executable because Qt WebEngine needs companion DLLs and resource
+files.
+
+There is also a manual Linux build workflow. It is experimental and should not
+be treated as official support until it has been tested by real Linux users.
+
+The app also supports a command-line `--event` selection path used by
+`Go to Event` and release smoke tests.
+
+## Breath of the Wild auto-completion
+
+This fork is maintained for TOTK, but the older Breath of the Wild
+auto-completion path is still present.
+
+To enable BOTW actor/action/query auto-completion, add:
 
 ```ini
 [paths]
 rom_root=/path/to/game_rom
 ```
 
-to EventEditor's configuration file, where `/path/to/game_rom` is a path such that
-`/path/to/game_rom/Pack/Bootup.pack/Actor/AIDef/AIDef_Game.product.sbyml` exists.
-An easy, recommended way to get the required file structure without extracting every archive
-is to use [botwfstools](https://github.com/leoetlino/botwfstools).
+The path should contain:
 
-#### Other games
+```text
+Pack/Bootup.pack/Actor/AIDef/AIDef_Game.product.sbyml
+```
 
-Alternatively, JSON actor definitions can be generated under *Flowchart* > *Export actor definition data to JSON*. This will generate information for auto-completion from the currently open event flow. The first time this is run, a prompt will appear asking for where to save this information.
+An easy way to get that file structure without extracting every archive is
+[botwfstools](https://github.com/leoetlino/botwfstools).
 
-This action can be safely repeated in case other event flows contain actors, actions, or queries that have yet to be included in the JSON file (existing entries will not be overwritten).
+Alternatively, JSON actor definitions can be generated from the currently open
+event flow with `Flowchart` > `Export actor definition data to JSON`.
 
-### Known issues
+## Known issues
 
-* On Linux, if the main window view is a completely blank screen, even after opening a file, try running `QTWEBENGINE_DISABLE_SANDBOX=1 eventeditor` to start the tool.
+- Linux builds are experimental. If the main window is blank after opening a
+  file, try running with `QTWEBENGINE_DISABLE_SANDBOX=1`.
+- Unlinking events around fork/join structures can break graph generation. Be
+  careful when editing those sections.
+- The Event Library may report skipped files while collecting examples. This
+  usually means a file could not be opened, decompressed, or parsed during the
+  scan. It is not fatal for normal editing.
 
-* Unlinking events while in fork/join will break graph generation most of the time. So using that option is not recommended when fork/join events are involved.
+## Credits and provenance
 
-### What needs to be done
+This fork is based on the original open-source EventEditor project by
+[leoetlino](https://github.com/leoetlino) and contributors.
 
-* Timeline files (reverse engineering)
+The user-facing quality-of-life behavior reconstructed in this fork originated
+with Alciel's EventEditor build. Credit for the original QoL design and behavior
+goes to Alciel; this repository provides a maintained source reconstruction and
+public release path for those changes.
 
-* Collect event info from EventInfo and have a metadata file for each event flow, so that:
-    * EventInfo can be automatically regenerated
-    * All copies of an event flow can be automatically updated
+Maintained by [cargocult-mods](https://github.com/cargocult-mods) with Codex
+assistance.
 
-* Node order shuffling to get less crossings. This used to be a dagre.js feature but it got removed...
+## License
 
-### License
-
-This software is licensed under the terms of the GNU General Public License, version 2 or later.
+This software is licensed under the terms of the GNU General Public License,
+version 2 or later.
