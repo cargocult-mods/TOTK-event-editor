@@ -17,18 +17,22 @@ untested. The Windows zip is the supported release asset.
 TOTK EventEditor is a maintained EventEditor fork focused on Tears of the
 Kingdom event-flow modding.
 
-EventFlow files are the game's event scripts. In TOTK, they control many of the
-things that happen during conversations, cutscenes, quest steps, shrine logic,
-shop interactions, tutorials, and other scripted moments. An EventFlow usually
-describes a flowchart: which actors are involved, which action or query each
-actor should run, which branch comes next, and what parameters are passed into
-those actions.
+In TOTK, eventflows control many of the things that happen during
+conversations, cutscenes, quest steps, shrine logic, shop interactions,
+minigames, and other scripted moments.
 
-It lets you open, inspect, edit, and save `.bfevfl` and `.bfevfl.zs` event flow
-files. It keeps the familiar EventEditor graph workflow while adding tools aimed
-at common TOTK modding problems: compressed event files, message preview,
-actor-aware action/query discovery, faster navigation, and release builds that
-do not require setting up Python.
+An eventflow is a flowchart, a sequence of:
+- actions performed by actors - not just NPCs but also various game systems
+- queries checking elements of the game's state from which different possible
+  outcomes can be chosen
+- pointers to run other eventflows, or shortcut around to other areas of the
+  flowchart
+
+This tool lets you open, inspect, edit, and save `.bfevfl` and `.bfevfl.zs`
+event flow files.
+
+This TOTK-specific fork includes many quality of life upgrades to help with
+editing, building, and designing eventflows.
 
 ## Main features
 
@@ -38,12 +42,9 @@ do not require setting up Python.
 - Edit node type, actor, parameters, links, cases, and other event data.
 - See Mals/MSBT message text while working with dialogue events.
 - Browse actor-specific action/query possibilities with the Event Library.
-- Import and export XML helpers for event-flow work.
-- Drag files onto the app window to open them.
-- Use GitHub release builds on Windows without installing Python.
-- Check for updates from inside the app.
 
-## Event Library
+## New - Event Library
+<img width="979" height="589" alt="Capture" src="https://github.com/user-attachments/assets/a4e0a04d-7d06-4194-b078-bd944c00800e" />
 
 When editing an action or query node, click `Library...` beside the node type
 dropdown. The library helps you understand what an actor can do in EventFlow:
