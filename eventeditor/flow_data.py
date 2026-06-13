@@ -29,16 +29,22 @@ class FlowData(qc.QObject):
         self.flowDataChanged.connect(lambda reason: self.auto_save.save(self.flow))
 
         self.flow: typing.Optional[EventFlow] = None
+        self.flow_path = ''
+        self.revision = 0
 
         self.actor_model = ActorModel()
         self.entry_point_model = EntryPointModel()
         self.event_model = EventModel()
 
+        self.flowDataChanged.connect(lambda reason: self._incrementRevision())
         util.connect_model_change_signals(self.actor_model, self, FlowDataChangeReason.Actors)
         util.connect_model_change_signals(self.entry_point_model, self, FlowDataChangeReason.Events)
         util.connect_model_change_signals(self.event_model, self, FlowDataChangeReason.Events)
 
         self._next_event_idx = 0
+
+    def _incrementRevision(self) -> None:
+        self.revision += 1
 
     def setFlow(self, flow: typing.Optional[EventFlow], emit_file_loaded: bool = True) -> None:
         self.flow = flow

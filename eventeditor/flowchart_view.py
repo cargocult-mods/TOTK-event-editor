@@ -14,6 +14,7 @@ from eventeditor.event_branch_editors import SwitchEventEditDialog, ForkEventEdi
 from eventeditor.event_edit_dialog import show_event_editor
 from eventeditor.event_chooser_dialog import show_event_type_chooser, add_new_event, EventChooserDialog, CheckableEventParentListWidget
 from eventeditor.event_fork_chooser_dialog import EventForkChooserDialog
+import eventeditor.event_library as event_library
 from eventeditor.flow_data import FlowData, FlowDataChangeReason
 from eventeditor.entry_point_model import EntryPointModel
 import eventeditor.flowchart_tools as ft
@@ -228,6 +229,7 @@ class FlowchartView(q.QWidget):
     eventSelected = qc.pyqtSignal(int)
     selectedNodeIdsChanged = qc.pyqtSignal(list)
     externalSubflowOpenRequested = qc.pyqtSignal(str, str)
+    libraryExampleOpenRequested = qc.pyqtSignal(str, str)
 
     def __init__(self, parent, flow_data: FlowData) -> None:
         super().__init__(parent)
@@ -1222,6 +1224,56 @@ class FlowchartView(q.QWidget):
             f'This file does not contain an entry point named "{entry_point_name}".',
         )
 
+    def sourceFileMatchesCurrentFlow(self, source_file: str) -> bool:
+        flow_path = getattr(self.flow_data, 'flow_path', '')
+        if not source_file or not flow_path:
+            return False
+        current_file = Path(flow_path).name
+        return (
+            source_file == current_file or
+            event_library.eventflow_display_name(source_file) == event_library.eventflow_display_name(current_file)
+        )
+
+    def selectEventByName(self, event_name: str, title: str = 'Go to Event', defer_reveal: bool = False) -> bool:
+        if not self.flow_data.flow or not self.flow_data.flow.flowchart:
+            return False
+        for idx, event in enumerate(self.flow_data.flow.flowchart.events):
+            if event.name != event_name:
+                continue
+            self.selected_event = event
+            self.selected_node_id = idx
+            if defer_reveal:
+                self.pending_reveal_node_id = idx
+                self.pending_reveal_duration_ms = 500
+                self.suppress_reload_reselect = True
+            self.web_object.revealRequested.emit(idx)
+            return True
+
+        q.QMessageBox.information(
+            self,
+            title,
+            f'This file does not contain an event named "{event_name}".',
+        )
+        return False
+
+    def goToLibraryExample(self, example) -> None:
+        source_file = getattr(example, 'source_file', '')
+        event_name = getattr(example, 'event_name', '')
+        if not source_file or not event_name:
+            q.QMessageBox.information(
+                self,
+                'Go to Event',
+                'This example does not include a source event.',
+            )
+            return
+        if (
+            getattr(example, 'source_label', '') == event_library.SOURCE_CURRENT_FILE or
+            self.sourceFileMatchesCurrentFlow(source_file)
+        ):
+            self.selectEventByName(event_name, 'Go to Event')
+            return
+        self.libraryExampleOpenRequested.emit(source_file, event_name)
+
     def webShowOnlyConnectedEvents(self, node_id: int) -> None:
         rows_to_show = set(self._connectedEntryPointRowsForNode(node_id))
         all_rows = self._allEntryPointRows()
@@ -1250,6 +1302,14 @@ class FlowchartView(q.QWidget):
 
     def delayedSelect(self, event: Event) -> None:
         self.pending_reveal_event = event
+        self.suppress_reload_reselect = True
+
+    def prepareNodeEditCommit(self, event: Event, node_id: int) -> None:
+        self.selected_event = event
+        self.selected_node_id = node_id
+        self.pending_reveal_event = event
+        self.pending_reveal_node_id = None
+        self.pending_reveal_duration_ms = 500
         self.suppress_reload_reselect = True
 
     def _getSelectedEntryPointRowsFromView(self) -> typing.List[int]:

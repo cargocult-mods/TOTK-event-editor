@@ -910,7 +910,9 @@ class MainWindow(q.QMainWindow):
         self._hide_non_formatting_mals_tags = False
         self._include_mals_blank_lines = False
         self._show_mals_text_bubble_breaks = True
+        self._smoke_test = bool(getattr(args, 'smoke_test', False))
         self._startup_entry_point_name = getattr(args, 'entry_point', '') or ''
+        self._startup_event_name = getattr(args, 'event', '') or ''
         self._update_check_url = getattr(args, 'update_check_url', '') or GITHUB_LATEST_RELEASE_API_URL
         self._update_check_current_version = getattr(args, 'update_check_current_version', '') or ''
         self._update_releases_url = getattr(args, 'update_releases_url', '') or GITHUB_RELEASES_URL
@@ -942,6 +944,8 @@ class MainWindow(q.QMainWindow):
         self._version = get_display_version()
 
     def initUpdateCheck(self) -> None:
+        if self._smoke_test:
+            return
         self._update_check_signals.updateAvailable.connect(self.onUpdateAvailable)
         qc.QTimer.singleShot(1500, self.startUpdateCheck)
 
@@ -1001,10 +1005,12 @@ class MainWindow(q.QMainWindow):
                 paths.append(local_path)
         return paths
 
-    def _launchNewInstanceForPath(self, path: str, entry_point_name: str = '') -> bool:
+    def _launchNewInstanceForPath(self, path: str, entry_point_name: str = '', event_name: str = '') -> bool:
         launch_args: typing.List[str] = []
         if entry_point_name:
             launch_args.extend(['--entry-point', entry_point_name])
+        if event_name:
+            launch_args.extend(['--event', event_name])
         launch_args.append(path)
         if getattr(sys, 'frozen', False):
             return qc.QProcess.startDetached(sys.executable, launch_args)
@@ -1058,6 +1064,10 @@ class MainWindow(q.QMainWindow):
 
     def eventFilter(self, watched, event):
         event_type = event.type()
+        if watched == self.menuBar() and event_type in (qc.QEvent.Resize, qc.QEvent.Show):
+            self.positionUpdateAvailableButton()
+            return super().eventFilter(watched, event)
+
         if event_type in (qc.QEvent.DragEnter, qc.QEvent.DragMove, qc.QEvent.Drop):
             if not isinstance(watched, q.QWidget):
                 return super().eventFilter(watched, event)
@@ -1082,6 +1092,7 @@ class MainWindow(q.QMainWindow):
         if self.args.event_flow_file:
             if self.readFlow(self.args.event_flow_file):
                 self.selectStartupEntryPointIfRequested()
+                self.selectStartupEventIfRequested()
 
     def initMenu(self) -> None:
         menu = self.menuBar()
@@ -1266,11 +1277,6 @@ QToolButton:hover, QToolButton:pressed {
     def about(self) -> None:
         q.QMessageBox.about(self, f'About {APP_DISPLAY_NAME}', build_about_html(self._version))
 
-    def eventFilter(self, watched: qc.QObject, event: qc.QEvent) -> bool:
-        if watched == self.menuBar() and event.type() in (qc.QEvent.Resize, qc.QEvent.Show):
-            self.positionUpdateAvailableButton()
-        return super().eventFilter(watched, event)
-
     def positionUpdateAvailableButton(self) -> None:
         if not hasattr(self, 'update_available_button'):
             return
@@ -1417,6 +1423,7 @@ QToolButton:hover, QToolButton:pressed {
         self.flowchart_view.readySignal.connect(self.onViewReady)
         self.flowchart_view.eventSelected.connect(self.onEventSelected)
         self.flowchart_view.externalSubflowOpenRequested.connect(self.onOpenExternalSubflowRequested)
+        self.flowchart_view.libraryExampleOpenRequested.connect(self.onOpenLibraryExampleRequested)
         self.reload_graph_action.triggered.connect(self.flowchart_view.reload)
         self.export_graph_action.triggered.connect(self.flowchart_view.export)
         self.export_definitions_action.triggered.connect(self.flowchart_view.export_definitions)
@@ -1900,6 +1907,14 @@ QToolButton:hover, QToolButton:pressed {
                 f'Failed to open {Path(path).name} in a new EventEditor window.',
             )
 
+    def openLibraryExampleTarget(self, path: str, event_name: str) -> None:
+        if not self._launchNewInstanceForPath(path, event_name=event_name):
+            q.QMessageBox.warning(
+                self,
+                'Go to Event',
+                f'Failed to open {Path(path).name} in a new EventEditor window.',
+            )
+
     def selectStartupEntryPointIfRequested(self) -> None:
         if not self._startup_entry_point_name or not self.flow:
             return
@@ -1907,6 +1922,36 @@ QToolButton:hover, QToolButton:pressed {
         self._startup_entry_point_name = ''
         self.tab_widget.setCurrentWidget(self.flowchart_view)
         self.flowchart_view.selectEntryPointByName(entry_point_name)
+
+    def selectStartupEventIfRequested(self) -> None:
+        if not self._startup_event_name or not self.flow:
+            return
+        event_name = self._startup_event_name
+        self._startup_event_name = ''
+        self.tab_widget.setCurrentWidget(self.flowchart_view)
+        self.flowchart_view.selectEventByName(event_name, 'Go to Event', defer_reveal=True)
+
+    def onOpenLibraryExampleRequested(self, source_file: str, event_name: str) -> None:
+        display_name = f'{flow_filename_name_for_path(source_file)} / {event_name}'
+        if self.flowchart_view.sourceFileMatchesCurrentFlow(source_file):
+            self.flowchart_view.selectEventByName(event_name, 'Go to Event')
+            return
+
+        mod_path = self.findEventflowInCurrentMod(source_file)
+        if mod_path:
+            self.openLibraryExampleTarget(mod_path, event_name)
+            return
+
+        vanilla_path = self.findEventflowInVanillaRomfs(source_file)
+        if vanilla_path:
+            self.openLibraryExampleTarget(vanilla_path, event_name)
+            return
+
+        q.QMessageBox.information(
+            self,
+            'Go to Event',
+            f'{display_name} not found in this file, mod, or vanilla.',
+        )
 
     def onOpenExternalSubflowRequested(self, flow_name: str, entry_point_name: str) -> None:
         display_name = f'{flow_name}<{entry_point_name}>'
@@ -2127,6 +2172,7 @@ QToolButton:hover, QToolButton:pressed {
             util.read_flow(path, flow)
             self.flow = flow
             self.flow_path = path
+            self.flow_data.flow_path = path
             self.flow_data.setFlow(flow)
             self.resetUndoHistory()
             if self._mals_mode in (MALS_MODE_VANILLA, MALS_MODE_INFERRED):
@@ -2163,6 +2209,7 @@ QToolButton:hover, QToolButton:pressed {
         try:
             util.write_flow(path, self.flow)
             self.flow_path = path
+            self.flow_data.flow_path = path
             self.undo_stack.setClean()
             if self._mals_mode == MALS_MODE_INFERRED:
                 self.applyMalsSelection(force_reload=True, report_errors=False)
@@ -2235,6 +2282,7 @@ QToolButton:hover, QToolButton:pressed {
         finally:
             self._syncing_flowchart_visibility = False
         self.selectStartupEntryPointIfRequested()
+        self.selectStartupEventIfRequested()
 
     def onEventSelected(self, event_idx: int) -> None:
         self.event_view.selectEvent(event_idx)
@@ -2283,10 +2331,12 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(prog='eventeditor', description=f'{APP_DISPLAY_NAME}: an event flow editor')
     parser.add_argument('--entry-point', default='', help='Entry point to select after opening the event flow file')
+    parser.add_argument('--event', default='', help='Event node to select after opening the event flow file')
     parser.add_argument('--update-check-url', default='', help=argparse.SUPPRESS)
     parser.add_argument('--update-check-current-version', default='', help=argparse.SUPPRESS)
     parser.add_argument('--update-releases-url', default='', help=argparse.SUPPRESS)
     parser.add_argument('--update-force-reminder', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--smoke-test', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('event_flow_file', nargs='?', help='Event flow file to open')
     args, _ = parser.parse_known_args()
     app = q.QApplication(sys.argv)
@@ -2302,6 +2352,8 @@ def main() -> None:
         app.setFont(app_font)
     win = MainWindow(args)
     win.show()
+    if args.smoke_test:
+        qc.QTimer.singleShot(1000, app.quit)
     ret = app.exec_()
     sys.exit(ret)
 

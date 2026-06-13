@@ -1,12 +1,15 @@
 import tempfile
 import types
 import unittest
+import os
 from pathlib import Path
 import struct
 
-from evfl import Container, Event, EventFlow, Flowchart
+from evfl import Actor, Container, Event, EventFlow, Flowchart
+from evfl.common import RequiredIndex, StringHolder
 from evfl.entry_point import EntryPoint
-from evfl.event import ActionEvent, SubFlowEvent
+from evfl.event import ActionEvent, SubFlowEvent, SwitchEvent
+import oead
 import PyQt5.QtCore as qc # type: ignore
 
 from eventeditor.container_model import (
@@ -57,10 +60,74 @@ from eventeditor.__main__ import (
 import eventeditor.actor_xml as actor_xml
 import eventeditor.container_xml as container_xml
 import eventeditor.entry_point_tree_xml as entry_point_tree_xml
+import eventeditor.event_library as event_library
 import eventeditor._version as versioneer_runtime_config
 import eventeditor.mals as mals
 import eventeditor.totk_zs as totk_zs
 import eventeditor.util as util
+
+
+def make_action_flow(flow_name, actor_name, action_name, params):
+    flow = EventFlow()
+    flow.name = flow_name
+    flow.flowchart = Flowchart()
+    flow.flowchart.name = flow_name
+
+    actor = Actor()
+    actor.identifier.name = actor_name
+    actor.actions = [StringHolder(action_name)]
+
+    event = Event()
+    event.name = 'Event0'
+    event.data = ActionEvent()
+    event.data.actor.v = actor
+    event.data.actor_action.v = actor.actions[0]
+    event.data.params = Container()
+    event.data.params.data = dict(params)
+
+    flow.flowchart.actors = [actor]
+    flow.flowchart.events = [event]
+    flow.flowchart.entry_points = []
+    return flow
+
+
+def make_query_flow(flow_name, actor_name, query_name, params):
+    flow = EventFlow()
+    flow.name = flow_name
+    flow.flowchart = Flowchart()
+    flow.flowchart.name = flow_name
+
+    actor = Actor()
+    actor.identifier.name = actor_name
+    actor.queries = [StringHolder(query_name)]
+
+    query_event = Event()
+    query_event.name = 'EventQuery'
+    query_event.data = SwitchEvent()
+    query_event.data.actor.v = actor
+    query_event.data.actor_query.v = actor.queries[0]
+    query_event.data.params = Container()
+    query_event.data.params.data = dict(params)
+
+    target_event = Event()
+    target_event.name = 'EquippedBranch'
+    target_ref = RequiredIndex()
+    target_ref.v = target_event
+    query_event.data.cases[0] = target_ref
+
+    flow.flowchart.actors = [actor]
+    flow.flowchart.events = [query_event, target_event]
+    flow.flowchart.entry_points = []
+    return flow
+
+
+def write_sarc(path, files):
+    writer = oead.SarcWriter()
+    for name, data in files.items():
+        writer.files[name] = data
+    _alignment, sarc_data = writer.write()
+    path.parent.mkdir(parents=True)
+    path.write_bytes(bytes(sarc_data))
 
 
 class ReconstructedQoLTests(unittest.TestCase):
@@ -446,6 +513,255 @@ class ReconstructedQoLTests(unittest.TestCase):
         ]
         self.assertEqual(actor_xml.loads_actors(actor_xml.dumps_actors(payload)), payload)
 
+    def test_event_library_scans_mod_then_vanilla_eventflows(self):
+        event_library.clear_event_library_cache()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            previous_cache_dir = os.environ.get(event_library._VANILLA_EVENT_LIBRARY_CACHE_ENV)
+            def restore_cache_dir():
+                if previous_cache_dir is None:
+                    os.environ.pop(event_library._VANILLA_EVENT_LIBRARY_CACHE_ENV, None)
+                else:
+                    os.environ[event_library._VANILLA_EVENT_LIBRARY_CACHE_ENV] = previous_cache_dir
+                event_library.clear_event_library_cache()
+            self.addCleanup(restore_cache_dir)
+            os.environ[event_library._VANILLA_EVENT_LIBRARY_CACHE_ENV] = str(root / 'EventLibraryCache')
+            event_library.clear_event_library_cache(clear_disk=True)
+
+            mod_flow_dir = root / 'Mod' / 'romfs' / 'Event' / 'EventFlow'
+            other_mod_flow_dir = root / 'OtherMod' / 'romfs' / 'Event' / 'EventFlow'
+            vanilla_flow_dir = root / 'Vanilla' / 'Event' / 'EventFlow'
+            mod_flow_dir.mkdir(parents=True)
+            other_mod_flow_dir.mkdir(parents=True)
+            vanilla_flow_dir.mkdir(parents=True)
+            mod_path = mod_flow_dir / 'Current.bfevfl'
+            other_mod_path = other_mod_flow_dir / 'Current.bfevfl'
+            vanilla_path = vanilla_flow_dir / 'Vanilla.bfevfl'
+            util.write_flow(str(mod_path), make_action_flow('Current', 'Player', 'EventTriggerModOnly', {'Slot': 1}))
+            util.write_flow(str(other_mod_path), make_action_flow('Current', 'Player', 'EventTriggerOtherMod', {'Slot': 4}))
+            util.write_flow(str(vanilla_path), make_action_flow('Vanilla', 'Player', 'EventTriggerVanillaOnly', {'EquipmentState': 2}))
+            (mod_flow_dir / 'Broken.bfevfl').write_bytes(b'not an eventflow')
+
+            result = event_library.build_actor_event_library(
+                'Player',
+                event_library.EVENT_LIBRARY_ACTION,
+                flow_path=str(mod_path),
+                vanilla_romfs=root / 'Vanilla',
+            )
+
+            names = [entry.name for entry in result.entries]
+            self.assertIn('EventTriggerModOnly', names)
+            self.assertIn('EventTriggerVanillaOnly', names)
+            self.assertLess(names.index('EventTriggerModOnly'), names.index('EventTriggerVanillaOnly'))
+            mod_entry = next(entry for entry in result.entries if entry.name == 'EventTriggerModOnly')
+            self.assertIn('Mod flow examples', mod_entry.sources)
+            self.assertEqual(mod_entry.default_params(), {'Slot': 1})
+            self.assertEqual(mod_entry.vanilla_parameter_names(), [])
+            vanilla_entry = next(entry for entry in result.entries if entry.name == 'EventTriggerVanillaOnly')
+            self.assertEqual(vanilla_entry.vanilla_parameter_names(), ['EquipmentState'])
+            self.assertEqual(
+                vanilla_entry.vanilla_parameters()[0].seed_value_for_sources(lambda source: source.startswith('Vanilla ')),
+                2,
+            )
+            self.assertFalse(result.from_cache)
+            self.assertTrue(any((root / 'EventLibraryCache').glob('vanilla-v*.pickle')))
+            self.assertTrue(any(
+                error.startswith('Broken.bfevfl - Could not parse or decompress EventFlow:')
+                for error in result.errors
+            ))
+
+            cached = event_library.build_actor_event_library(
+                'Player',
+                event_library.EVENT_LIBRARY_ACTION,
+                flow_path=str(mod_path),
+                vanilla_romfs=root / 'Vanilla',
+                current_revision=1,
+            )
+            self.assertTrue(cached.from_cache)
+            revision_changed = event_library.build_actor_event_library(
+                'Player',
+                event_library.EVENT_LIBRARY_ACTION,
+                flow_path=str(mod_path),
+                vanilla_romfs=root / 'Vanilla',
+                current_revision=99,
+            )
+            self.assertTrue(revision_changed.from_cache)
+
+            util.write_flow(
+                str(vanilla_path),
+                make_action_flow('Vanilla', 'Player', 'EventTriggerVanillaChanged', {'EquipmentState': 9}),
+            )
+            event_library.clear_event_library_cache()
+            cross_mod = event_library.build_actor_event_library(
+                'Player',
+                event_library.EVENT_LIBRARY_ACTION,
+                flow_path=str(other_mod_path),
+                vanilla_romfs=root / 'Vanilla',
+            )
+            cross_mod_names = [entry.name for entry in cross_mod.entries]
+            self.assertIn('EventTriggerVanillaOnly', cross_mod_names)
+            self.assertNotIn('EventTriggerVanillaChanged', cross_mod_names)
+
+            forced = event_library.build_actor_event_library(
+                'Player',
+                event_library.EVENT_LIBRARY_ACTION,
+                flow_path=str(other_mod_path),
+                vanilla_romfs=root / 'Vanilla',
+                force_rebuild=True,
+            )
+            forced_names = [entry.name for entry in forced.entries]
+            self.assertIn('EventTriggerVanillaChanged', forced_names)
+            self.assertNotIn('EventTriggerVanillaOnly', forced_names)
+
+            vanilla_current_flow = make_action_flow(
+                'CurrentVanilla',
+                'Player',
+                'EventTriggerVanillaCurrent',
+                {'EquipmentState': 5},
+            )
+            vanilla_current_path = vanilla_flow_dir / 'CurrentVanilla.bfevfl'
+            util.write_flow(str(vanilla_current_path), vanilla_current_flow)
+            vanilla_context = event_library.build_actor_event_library(
+                'Player',
+                event_library.EVENT_LIBRARY_ACTION,
+                current_flow=vanilla_current_flow,
+                flow_path=str(vanilla_current_path),
+                vanilla_romfs=root / 'Vanilla',
+                force_rebuild=True,
+            )
+            self.assertFalse(vanilla_context.mod_context_enabled)
+            self.assertFalse(any(entry.has_mod_source() for entry in vanilla_context.entries))
+            vanilla_current_entry = next(
+                entry for entry in vanilla_context.entries
+                if entry.name == 'EventTriggerVanillaCurrent'
+            )
+            self.assertIn('Current file', vanilla_current_entry.sources)
+            self.assertIn('Vanilla flow examples', vanilla_current_entry.sources)
+
+            util.write_flow(
+                str(mod_flow_dir / 'New.bfevfl'),
+                make_action_flow('New', 'Player', 'EventTriggerNewInfo', {'Slot': 2}),
+            )
+            refreshed = event_library.build_actor_event_library(
+                'Player',
+                event_library.EVENT_LIBRARY_ACTION,
+                flow_path=str(mod_path),
+                vanilla_romfs=root / 'Vanilla',
+            )
+            self.assertFalse(refreshed.from_cache)
+            self.assertIn('EventTriggerNewInfo', [entry.name for entry in refreshed.entries])
+
+    def test_event_library_records_query_parameters_and_cases(self):
+        event_library.clear_event_library_cache()
+        flow = make_query_flow('Current', 'Player', 'EventQueryCheckIsEquippedDynamicEquipment', {'DynamicEquipmentSlot': 0})
+
+        result = event_library.build_actor_event_library(
+            'Player',
+            event_library.EVENT_LIBRARY_QUERY,
+            current_flow=flow,
+            flow_path='Current.bfevfl',
+        )
+
+        self.assertEqual(len(result.entries), 1)
+        entry = result.entries[0]
+        self.assertEqual(entry.name, 'EventQueryCheckIsEquippedDynamicEquipment')
+        self.assertEqual(entry.default_params(), {'DynamicEquipmentSlot': 0})
+        self.assertEqual(entry.case_targets, {0: ['EquippedBranch']})
+        self.assertEqual(entry.case_count(), 1)
+        self.assertEqual(entry.case_value_summary(), '0')
+        case_entry = event_library.EventLibraryEntry(event_library.EVENT_LIBRARY_QUERY, 'EventQueryRanges', 0)
+        case_entry.case_targets = {value: [] for value in list(range(14)) + [15]}
+        self.assertEqual(case_entry.case_value_summary(), '0-13, 15')
+        empty_param_vanilla_entry = event_library.EventLibraryEntry(
+            event_library.EVENT_LIBRARY_QUERY,
+            'EventQueryEquipWeaponSlotType',
+            4,
+        )
+        empty_param_vanilla_entry.add_observed(
+            'Vanilla flow examples',
+            4,
+            'Vanilla.bfevfl',
+            'Event0',
+            {},
+            {0: 'Event0', 1: 'Event1', 2: 'Event2', 3: 'Event3'},
+        )
+        self.assertTrue(empty_param_vanilla_entry.has_vanilla_baseline())
+        self.assertEqual(empty_param_vanilla_entry.vanilla_parameters(), [])
+        self.assertEqual(empty_param_vanilla_entry.case_value_summary(), '0-3')
+        sample_entry = event_library.EventLibraryEntry(event_library.EVENT_LIBRARY_ACTION, 'EventTriggerSampleLimit', 0)
+        for index in range(event_library.MAX_ENTRY_EXAMPLES + 2):
+            sample_entry.add_observed('Vanilla flow examples', 4, 'Sample.bfevfl', 'Event{}'.format(index), {'Index': index})
+        self.assertEqual(sample_entry.observed_example_count(), event_library.MAX_ENTRY_EXAMPLES + 2)
+        self.assertEqual(sample_entry.example_count_label(), str(event_library.MAX_ENTRY_EXAMPLES + 2))
+        self.assertEqual(len(sample_entry.examples), event_library.MAX_ENTRY_EXAMPLES)
+        self.assertEqual(len(sample_entry.all_observed_examples()), event_library.MAX_ENTRY_EXAMPLES + 2)
+        self.assertEqual(len(sample_entry.preview_examples()), event_library.MAX_ENTRY_EXAMPLES)
+
+        mixed_entry = event_library.EventLibraryEntry(event_library.EVENT_LIBRARY_ACTION, 'EventTriggerMixedSources', 0)
+        for index in range(4):
+            mixed_entry.add_observed('Current file', 0, 'Current.bfevfl', 'EventC{}'.format(index), {'Index': index})
+            mixed_entry.add_observed('Mod flow examples', 2, 'Mod.bfevfl', 'EventM{}'.format(index), {'Index': index})
+            mixed_entry.add_observed('Vanilla flow examples', 4, 'Vanilla.bfevfl', 'EventV{}'.format(index), {'Index': index})
+        preview_groups = [example.source_group() for example in mixed_entry.preview_examples()]
+        self.assertEqual(preview_groups.count(event_library.SOURCE_GROUP_CURRENT), 2)
+        self.assertEqual(preview_groups.count(event_library.SOURCE_GROUP_MOD), 2)
+        self.assertEqual(preview_groups.count(event_library.SOURCE_GROUP_VANILLA), 4)
+        self.assertEqual(mixed_entry.preview_examples([]), [])
+
+        unusual_entry = event_library.EventLibraryEntry(event_library.EVENT_LIBRARY_ACTION, 'EventTriggerUsual', 0)
+        for index in range(4):
+            unusual_entry.add_observed('Vanilla flow examples', 4, 'Vanilla.bfevfl', 'Event{}'.format(index), {
+                'State': 1,
+                'Slot': index,
+            })
+        unusual_entry.add_observed('Current file', 0, 'Current.bfevfl', 'EventOdd', {
+            'State': 9,
+            'Extra': True,
+        })
+        notes = unusual_entry.unusual_notes(unusual_entry.all_observed_examples()[-1])
+        self.assertTrue(any('Missing usual parameter' in note for note in notes))
+        self.assertTrue(any('Extra parameter' in note for note in notes))
+        self.assertTrue(any('Rare value' in note for note in notes))
+        self.assertEqual(event_library.format_library_value('Playing'), '"Playing"')
+        self.assertEqual(event_library.format_library_value('Playing', quote_strings=False), 'Playing')
+        example = event_library.EventLibraryExample(
+            'Vanilla flow examples',
+            'DmF_SY_Test.bfevfl.zs',
+            'Event42',
+            {},
+        )
+        self.assertEqual(example.display_name(), 'DmF_SY_Test / Event42')
+        self.assertEqual(example.display_label(), 'DmF_SY_Test / Event42 (Vanilla flow examples)')
+
+    def test_event_library_scans_actor_pack_ainb_names_without_parser(self):
+        event_library.clear_event_library_cache()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            flow_path = root / 'Event' / 'EventFlow' / 'Current.bfevfl'
+            flow_path.parent.mkdir(parents=True)
+            pack_path = root / 'Pack' / 'Actor' / 'Player.pack'
+            write_sarc(pack_path, {
+                'AI/Player.event.root.ainb': (
+                    b'header\x00EventTriggerRuntimeOnly\x00EventQueryRuntimeOnly\x00'
+                    b'EventPerformer\x00EventStartPos\x00'
+                ),
+            })
+
+            actions = event_library.build_actor_event_library(
+                'Player',
+                event_library.EVENT_LIBRARY_ACTION,
+                flow_path=str(flow_path),
+            )
+            queries = event_library.build_actor_event_library(
+                'Player',
+                event_library.EVENT_LIBRARY_QUERY,
+                flow_path=str(flow_path),
+            )
+
+            self.assertIn('EventTriggerRuntimeOnly', [entry.name for entry in actions.entries])
+            self.assertNotIn('EventQueryRuntimeOnly', [entry.name for entry in actions.entries])
+            self.assertIn('EventQueryRuntimeOnly', [entry.name for entry in queries.entries])
+
     def test_entry_point_tree_xml_roundtrip(self):
         payload = {
             'version': 2,
@@ -588,6 +904,9 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn('self.update_available_button = q.QToolButton', main_py)
         self.assertIn('self.update_available_button.setText(\'Update available\')', main_py)
         self.assertIn('menu.installEventFilter(self)', main_py)
+        self.assertEqual(main_py.count('def eventFilter'), 1)
+        self.assertIn('if watched == self.menuBar() and event_type in (qc.QEvent.Resize, qc.QEvent.Show):', main_py)
+        self.assertIn('if event_type in (qc.QEvent.DragEnter, qc.QEvent.DragMove, qc.QEvent.Drop):', main_py)
         self.assertIn('def positionUpdateAvailableButton', main_py)
         self.assertIn("self.update_available_button.fontMetrics().horizontalAdvance('Update available') + 16", main_py)
         self.assertIn('self.update_available_button.setGeometry(x, 0, width, height)', main_py)
@@ -610,6 +929,9 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn("parser.add_argument('--update-check-current-version'", main_py)
         self.assertIn("parser.add_argument('--update-releases-url'", main_py)
         self.assertIn("parser.add_argument('--update-force-reminder'", main_py)
+        self.assertIn("parser.add_argument('--smoke-test'", main_py)
+        self.assertIn("if self._smoke_test:", main_py)
+        self.assertIn('qc.QTimer.singleShot(1000, app.quit)', main_py)
         self.assertIn('self._update_force_reminder or not self.isUpdateReminderDismissed(update_info)', main_py)
         self.assertIn('ThreadingHTTPServer', fake_update_launcher_py)
         self.assertIn("FAKE_LATEST_VERSION = 'v9.9.10-test'", fake_update_launcher_py)
@@ -727,6 +1049,26 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn('--name "$env:APP_BUNDLE_NAME"', workflow)
         self.assertIn('Compress-Archive -Path "dist/$env:APP_BUNDLE_NAME/*"', workflow)
 
+    def test_linux_build_is_manual_and_experimental(self):
+        workflow = (Path(__file__).resolve().parents[1] / '.github' / 'workflows' / 'build-linux-experimental.yml').read_text(encoding='utf-8')
+        self.assertIn('name: Build Linux executable (experimental)', workflow)
+        self.assertIn('workflow_dispatch:', workflow)
+        self.assertNotIn('push:', workflow)
+        self.assertIn('runs-on: ubuntu-24.04', workflow)
+        self.assertIn('QT_QPA_PLATFORM: offscreen', workflow)
+        self.assertIn('QTWEBENGINE_DISABLE_SANDBOX', workflow)
+        self.assertIn('libxcb-cursor0', workflow)
+        self.assertIn('libxkbcommon-x11-0', workflow)
+        self.assertIn('xvfb', workflow)
+        self.assertIn('python -m pip install . pyinstaller', workflow)
+        self.assertIn('python -m unittest discover -s tests', workflow)
+        self.assertIn('--hidden-import PyQt5.QtWebEngineWidgets', workflow)
+        self.assertIn('--name "$APP_BUNDLE_NAME"', workflow)
+        self.assertIn('xvfb-run -a "dist/$APP_BUNDLE_NAME/$APP_BUNDLE_NAME" --smoke-test', workflow)
+        self.assertIn('tar -C dist -czf "$PACKAGE_NAME" "$APP_BUNDLE_NAME"', workflow)
+        self.assertIn('TOTK-EventEditor_${safeVersion}-Linux-x86_64', workflow)
+        self.assertNotIn('gh release upload', workflow)
+
     def test_event_chooser_headers_sort_ascending_then_descending(self):
         source_root = Path(__file__).resolve().parents[1] / 'eventeditor'
         event_view_py = (source_root / 'event_view.py').read_text(encoding='utf-8')
@@ -736,6 +1078,10 @@ class ReconstructedQoLTests(unittest.TestCase):
         container_model_py = (source_root / 'container_model.py').read_text(encoding='utf-8')
         event_branch_editors_py = (source_root / 'event_branch_editors.py').read_text(encoding='utf-8')
         event_edit_dialog_py = (source_root / 'event_edit_dialog.py').read_text(encoding='utf-8')
+        event_library_py = (source_root / 'event_library.py').read_text(encoding='utf-8')
+        event_library_dialog_py = (source_root / 'event_library_dialog.py').read_text(encoding='utf-8')
+        flowchart_py = (source_root / 'flowchart_view.py').read_text(encoding='utf-8')
+        main_py = (source_root / '__main__.py').read_text(encoding='utf-8')
         sortable_proxy_model_py = (source_root / 'sortable_proxy_model.py').read_text(encoding='utf-8')
         ai_py = (source_root / 'ai.py').read_text(encoding='utf-8')
 
@@ -817,6 +1163,132 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn('def parameterClipboardNodeType(self)', event_edit_dialog_py)
         self.assertIn('confirm_parameter_paste_node_type(self, source_node_type, self.parameterClipboardNodeType())', event_edit_dialog_py)
         self.assertIn("confirm_parameter_paste_node_type(self, source_node_type, 'subflow')", event_edit_dialog_py)
+        self.assertIn("q.QPushButton('Library...')", event_edit_dialog_py)
+        self.assertIn('build_actor_event_library', event_edit_dialog_py)
+        self.assertIn('is_actor_event_library_cache_current', event_edit_dialog_py)
+        self.assertIn("self.param_view.addHeaderButton('Add Missing'", event_edit_dialog_py)
+        self.assertIn("self.param_view.addHeaderButton('Remove Excess'", event_edit_dialog_py)
+        self.assertIn('def onAddMissingParametersRequested', event_edit_dialog_py)
+        self.assertIn('def onRemoveExcessParametersRequested', event_edit_dialog_py)
+        self.assertIn('def currentLibraryEntry', event_edit_dialog_py)
+        self.assertIn('def currentNodeTypeName(self) -> str:', event_edit_dialog_py)
+        self.assertIn('self.attr_cbox.currentText().strip()', event_edit_dialog_py)
+        self.assertIn("entry.name.strip() == node_name", event_edit_dialog_py)
+        self.assertNotIn('refreshed = self.buildLibraryResult(actor, kind)', event_edit_dialog_py)
+        self.assertIn('No library entry was found for {}.', event_edit_dialog_py)
+        self.assertIn('if not entry.has_vanilla_baseline():', event_edit_dialog_py)
+        self.assertIn('vanilla expects no parameters', event_edit_dialog_py)
+        self.assertIn('already has no parameters, matching vanilla', event_edit_dialog_py)
+        self.assertIn('def cachedLibraryResult', event_edit_dialog_py)
+        self.assertIn('def rememberLibraryResult', event_edit_dialog_py)
+        self.assertIn('if not force_rebuild and cached_result:', event_edit_dialog_py)
+        self.assertIn('result = dialog.exec_()', event_edit_dialog_py)
+        self.assertIn('q.QDialogButtonBox.Cancel if apply_enabled else q.QDialogButtonBox.Close', event_edit_dialog_py)
+        self.assertIn('self.rememberLibraryResult(actor, kind, result)', event_edit_dialog_py)
+        self.assertIn('def promptAddMissingParameters', event_edit_dialog_py)
+        self.assertIn("self.param_view.addHeaderButton('Add Missing'", event_edit_dialog_py)
+        self.assertIn("button_box.addButton('Add Blank'", event_edit_dialog_py)
+        self.assertIn("button_box.addButton('Add All'", event_edit_dialog_py)
+        self.assertIn('example_combo = q.QComboBox()', event_edit_dialog_py)
+        self.assertIn('entry.all_observed_examples()', event_edit_dialog_py)
+        self.assertIn('example_combo.completer().setFilterMode(qc.Qt.MatchContains)', event_edit_dialog_py)
+        self.assertIn('example.display_label()', event_edit_dialog_py)
+        self.assertIn('def valuesForMissingParameters', event_edit_dialog_py)
+        self.assertIn('def actorLibraryLabel(self, actor: Actor, kind: str) -> str:', event_edit_dialog_py)
+        self.assertIn("'{} - {}'.format(actor.identifier.name, self.libraryKindLabel(kind))", event_edit_dialog_py)
+        self.assertIn('def showLibraryBuildDialog(self, library_label: str) -> q.QDialog:', event_edit_dialog_py)
+        self.assertIn('Building library for "{}"...', event_edit_dialog_py)
+        self.assertIn('No library entries were found for {}', event_edit_dialog_py)
+        self.assertIn('def prepareNodeEditCommit(self) -> None:', event_edit_dialog_py)
+        self.assertIn('parent.prepareNodeEditCommit(self.event, self.event_idx)', event_edit_dialog_py)
+        self.assertIn('self.prepareNodeEditCommit()', event_edit_dialog_py)
+        self.assertNotIn('QProgressDialog', event_edit_dialog_py)
+        self.assertIn('def addLibraryEntryToActor', event_edit_dialog_py)
+        self.assertIn("self.button_box.addButton('Add to Actor'", event_library_dialog_py)
+        self.assertIn("self.button_box.addButton('Rebuild Library'", event_library_dialog_py)
+        self.assertIn('self.parameter_table = q.QTableWidget()', event_library_dialog_py)
+        self.assertIn("self.tree.setHeaderLabels(['Node type', 'Params', 'Examples', 'Cases', 'File', 'Mod', 'Vanilla'])", event_library_dialog_py)
+        self.assertIn('self.tree.header().setStretchLastSection(False)', event_library_dialog_py)
+        self.assertIn("self.mod_context_enabled = getattr(result, 'mod_context_enabled', True)", event_library_dialog_py)
+        self.assertIn('self.tree.setColumnHidden(5, not self.mod_context_enabled)', event_library_dialog_py)
+        self.assertIn('if self.mod_context_enabled and self.mod_examples_check.isChecked():', event_library_dialog_py)
+        self.assertIn('{} files were skipped while collecting example values.', event_library_dialog_py)
+        self.assertIn('Each row includes the scan stage and the parser/decompression error.', event_library_dialog_py)
+        self.assertIn('entry.example_count_label()', event_library_dialog_py)
+        self.assertIn('def exampleTooltip', event_library_dialog_py)
+        self.assertIn('preview shows up to {} samples', event_library_dialog_py)
+        self.assertIn("q.QPushButton('All Uses...')", event_library_dialog_py)
+        self.assertIn("q.QCheckBox('Unusual only')", event_library_dialog_py)
+        self.assertIn('def selectedSourceGroups', event_library_dialog_py)
+        self.assertIn('def filteredExamples', event_library_dialog_py)
+        self.assertIn('self.details_bottom_spacer = q.QSpacerItem', event_library_dialog_py)
+        self.assertIn('self.details_bottom_spacer.changeSize', event_library_dialog_py)
+        self.assertIn('No known parameters or examples.', event_library_dialog_py)
+        self.assertIn('goToExampleRequested = qc.pyqtSignal(object)', event_library_dialog_py)
+        self.assertIn('self.examples_list.setContextMenuPolicy(qc.Qt.CustomContextMenu)', event_library_dialog_py)
+        self.assertIn("menu.addAction('Go to Event')", event_library_dialog_py)
+        self.assertNotIn('self.goToExampleRequested.emit(example)\n            self.reject()', event_library_dialog_py)
+        self.assertIn('item.setData(qc.Qt.UserRole, example)', event_library_dialog_py)
+        self.assertIn('def fitCompactTreeColumns', event_library_dialog_py)
+        self.assertIn('def parameterTooltip', event_library_dialog_py)
+        self.assertIn('self.case_values = q.QLineEdit()', event_library_dialog_py)
+        self.assertIn("self.case_label.setText('Observed switch cases')", event_library_dialog_py)
+        self.assertIn('if value is not None:', event_library_dialog_py)
+        self.assertIn('font.setItalic(True)', event_library_dialog_py)
+        self.assertNotIn("'Summary'", event_library_dialog_py)
+        self.assertNotIn('Observed branches', event_library_dialog_py)
+        self.assertIn('format_library_value(value, quote_strings=False)', event_library_dialog_py)
+        self.assertIn("'Examples:\\n' + '\\n'.join(examples)", event_library_dialog_py)
+        self.assertIn('def eventflow_display_name', event_library_py)
+        self.assertIn('def _format_scan_error', event_library_py)
+        self.assertIn('def _eventflow_skip_reason', event_library_py)
+        self.assertIn('def _actor_pack_skip_reason', event_library_py)
+        self.assertIn('def is_flow_path_in_vanilla_romfs', event_library_py)
+        self.assertIn('def mod_context_enabled_for_flow_path', event_library_py)
+        self.assertIn('mod_context_enabled = mod_context_enabled_for_flow_path(flow_path, vanilla_romfs)', event_library_py)
+        self.assertIn('Could not parse or decompress EventFlow', event_library_py)
+        self.assertIn('Could not decompress or open actor pack archive', event_library_py)
+        self.assertIn('def display_label(self) -> str:', event_library_py)
+        self.assertIn('self.example_count = 0', event_library_py)
+        self.assertIn('def observed_example_count(self) -> int:', event_library_py)
+        self.assertIn('def example_count_label(self) -> str:', event_library_py)
+        self.assertIn('SOURCE_GROUP_CURRENT', event_library_py)
+        self.assertIn('def source_group_for_label', event_library_py)
+        self.assertIn('self.all_examples = []', event_library_py)
+        self.assertIn('def all_observed_examples(self)', event_library_py)
+        self.assertIn('def preview_examples(self', event_library_py)
+        self.assertIn('def unusual_notes(self', event_library_py)
+        self.assertIn('target.example_count += source_entry.observed_example_count()', event_library_py)
+        self.assertIn('_VANILLA_EVENT_LIBRARY_CACHE', event_library_py)
+        self.assertIn('_VANILLA_EVENT_LIBRARY_DISK_CACHE_VERSION', event_library_py)
+        self.assertIn('TOTK_EVENTEDITOR_LIBRARY_CACHE_DIR', event_library_py)
+        self.assertIn('def _read_vanilla_disk_cache', event_library_py)
+        self.assertIn('def _write_vanilla_disk_cache', event_library_py)
+        self.assertIn('def _build_vanilla_actor_event_library', event_library_py)
+        self.assertIn('_write_vanilla_disk_cache(key, result)', event_library_py)
+        self.assertIn('def clear_event_library_cache(clear_disk: bool = False) -> None:', event_library_py)
+        self.assertIn('_merge_result_into_builders(builders, vanilla_result)', event_library_py)
+        self.assertIn('id(current_flow) if current_flow and not flow_path else 0', event_library_py)
+        self.assertNotIn('int(current_revision),', event_library_py)
+        self.assertNotIn("_eventflow_directory_signature(vanilla_root / 'Event' / 'EventFlow')", event_library_py)
+        self.assertIn("'Vanilla actor file'", event_library_py)
+        self.assertIn('def seed_value_for_sources', event_library_py)
+        self.assertIn('def vanilla_parameter_names', event_library_py)
+        self.assertIn('def has_vanilla_baseline(self) -> bool:', event_library_py)
+        self.assertIn('def is_actor_event_library_cache_current', event_library_py)
+        self.assertIn('EVENT_LIBRARY_ACTION', event_library_py)
+        self.assertIn('def prepareNodeEditCommit(self, event: Event, node_id: int) -> None:', flowchart_py)
+        self.assertIn('self.selected_event = event', flowchart_py)
+        self.assertIn('self.pending_reveal_event = event', flowchart_py)
+        self.assertIn('libraryExampleOpenRequested = qc.pyqtSignal(str, str)', flowchart_py)
+        self.assertIn('def goToLibraryExample(self, example) -> None:', flowchart_py)
+        self.assertIn('def selectEventByName(self, event_name: str', flowchart_py)
+        self.assertIn('self.libraryExampleOpenRequested.emit(source_file, event_name)', flowchart_py)
+        self.assertIn("parser.add_argument('--event'", main_py)
+        self.assertIn("launch_args.extend(['--event', event_name])", main_py)
+        self.assertIn('def selectStartupEventIfRequested(self) -> None:', main_py)
+        self.assertIn('def onOpenLibraryExampleRequested(self, source_file: str, event_name: str) -> None:', main_py)
+        self.assertIn('self.flowchart_view.libraryExampleOpenRequested.connect(self.onOpenLibraryExampleRequested)', main_py)
         self.assertNotIn('Flowchart name (optional)', event_edit_dialog_py)
         self.assertNotIn('Note: this flowchart', event_edit_dialog_py)
         self.assertNotIn('<self> (edit to specify an external flowchart)', event_edit_dialog_py)

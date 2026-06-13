@@ -1,0 +1,109 @@
+name: Build Linux executable (experimental)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: Optional version label to embed in the test build
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+    env:
+      QT_QPA_PLATFORM: offscreen
+      QTWEBENGINE_DISABLE_SANDBOX: '1'
+      QTWEBENGINE_CHROMIUM_FLAGS: --no-sandbox --disable-gpu
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Linux Qt runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2t64 \
+            libatk-bridge2.0-0 \
+            libegl1 \
+            libgtk-3-0 \
+            libnss3 \
+            libopengl0 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxkbcommon-x11-0 \
+            libxrandr2 \
+            libxss1 \
+            libxtst6 \
+            libxcb-cursor0 \
+            libxcb-xinerama0 \
+            xvfb
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prepare build metadata
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.release_version }}" ]; then
+            releaseVersion="${{ inputs.release_version }}"
+          else
+            shortSha="${GITHUB_SHA::7}"
+            releaseVersion="linux-test-$shortSha"
+          fi
+
+          safeVersion="$(printf '%s' "$releaseVersion" | sed 's/[^A-Za-z0-9._-]/-/g')"
+          appBundleName="TOTK Event Editor $releaseVersion"
+          artifactName="TOTK-EventEditor_${safeVersion}-Linux-x86_64"
+          packageName="$artifactName.tar.gz"
+
+          printf '%s' "$releaseVersion" > eventeditor/assets/release_version.txt
+          {
+            echo "RELEASE_VERSION=$releaseVersion"
+            echo "APP_BUNDLE_NAME=$appBundleName"
+            echo "ARTIFACT_NAME=$artifactName"
+            echo "PACKAGE_NAME=$packageName"
+          } >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install . pyinstaller
+
+      - name: Run tests
+        run: python -m unittest discover -s tests
+
+      - name: Build executable
+        run: |
+          python -m PyInstaller \
+            --noconfirm \
+            --clean \
+            --windowed \
+            --name "$APP_BUNDLE_NAME" \
+            --collect-all eventeditor \
+            --collect-all PyQt5 \
+            --hidden-import PyQt5.QtWebEngineWidgets \
+            --collect-all evfl \
+            --collect-all oead \
+            --collect-all byml \
+            --collect-all aamp \
+            --collect-all zstandard \
+            scripts/pyinstaller_entry.py
+
+      - name: Smoke test executable
+        run: xvfb-run -a "dist/$APP_BUNDLE_NAME/$APP_BUNDLE_NAME" --smoke-test
+
+      - name: Package executable
+        run: tar -C dist -czf "$PACKAGE_NAME" "$APP_BUNDLE_NAME"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.PACKAGE_NAME }}
