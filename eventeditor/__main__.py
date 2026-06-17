@@ -13,7 +13,7 @@ import urllib.request
 
 import evfl
 from evfl import EventFlow
-from evfl.event import SubFlowEvent
+from evfl.event import ActionEvent, ForkEvent, JoinEvent, SubFlowEvent, SwitchEvent
 import eventeditor.ai as ai
 import eventeditor.actor_json as aj
 import eventeditor.mals as mals
@@ -448,6 +448,175 @@ def find_missing_internal_subflow_calls(flow: typing.Optional[EventFlow]) -> typ
             event_name = getattr(event, 'name', '<unnamed event>')
             missing.append(f'{event_name} calls {target_display}')
     return missing
+
+def iter_event_next_events(event: typing.Any) -> typing.Iterable[typing.Any]:
+    data = getattr(event, 'data', None)
+    if isinstance(data, (ActionEvent, JoinEvent, SubFlowEvent)):
+        if data.nxt.v:
+            yield data.nxt.v
+    elif isinstance(data, SwitchEvent):
+        for case in data.cases.values():
+            if case.v:
+                yield case.v
+    elif isinstance(data, ForkEvent):
+        for fork in data.forks:
+            if fork.v:
+                yield fork.v
+        if data.join.v:
+            yield data.join.v
+
+def collect_reachable_entry_point_event_records(flow: typing.Optional[EventFlow],
+                                                entry_point_name: str) -> typing.List[typing.Tuple[str, typing.Any]]:
+    if not flow or not entry_point_name:
+        return []
+
+    events: typing.List[typing.Tuple[str, typing.Any]] = []
+    seen: typing.Set[int] = set()
+    for flowchart in iter_event_flow_flowcharts(flow):
+        source_flow_name = getattr(flowchart, 'name', '') or getattr(flow, 'name', '')
+        for entry_point in getattr(flowchart, 'entry_points', []) or []:
+            if getattr(entry_point, 'name', '') != entry_point_name:
+                continue
+            main_event = getattr(getattr(entry_point, 'main_event', None), 'v', None)
+            if not main_event:
+                continue
+            queue: typing.List[typing.Any] = [main_event]
+            while queue:
+                event = queue.pop(0)
+                event_id = id(event)
+                if event_id in seen:
+                    continue
+                seen.add(event_id)
+                events.append((source_flow_name, event))
+                queue.extend(iter_event_next_events(event))
+    return events
+
+def collect_reachable_entry_point_events(flow: typing.Optional[EventFlow], entry_point_name: str) -> typing.List[typing.Any]:
+    return [event for _source_flow_name, event in collect_reachable_entry_point_event_records(flow, entry_point_name)]
+
+def collect_all_flow_event_records(flow: typing.Optional[EventFlow]) -> typing.List[typing.Tuple[str, typing.Any]]:
+    events: typing.List[typing.Tuple[str, typing.Any]] = []
+    seen: typing.Set[int] = set()
+    for flowchart in iter_event_flow_flowcharts(flow):
+        source_flow_name = getattr(flowchart, 'name', '') or getattr(flow, 'name', '')
+        for event in getattr(flowchart, 'events', []) or []:
+            event_id = id(event)
+            if event_id in seen:
+                continue
+            seen.add(event_id)
+            events.append((source_flow_name, event))
+    return events
+
+def collect_all_flow_events(flow: typing.Optional[EventFlow]) -> typing.List[typing.Any]:
+    return [event for _source_flow_name, event in collect_all_flow_event_records(flow)]
+
+def subflow_references_from_event_records(
+    flow: typing.Optional[EventFlow],
+    event_records: typing.Iterable[typing.Tuple[str, typing.Any]],
+    include_internal: bool,
+) -> typing.List[typing.Tuple[str, str, bool]]:
+    if not flow:
+        return []
+
+    local_flow_names = set(flow_names_for_flow(flow))
+    refs: typing.List[typing.Tuple[str, str, bool]] = []
+    seen: typing.Set[typing.Tuple[str, str]] = set()
+    for source_flow_name, event in event_records:
+        event_data = getattr(event, 'data', None)
+        if not isinstance(event_data, SubFlowEvent):
+            continue
+        explicit_flow_name = getattr(event_data, 'res_flowchart_name', '') or ''
+        entry_point_name = getattr(event_data, 'entry_point_name', '') or ''
+        if not entry_point_name:
+            continue
+        flow_name = explicit_flow_name or source_flow_name
+        is_internal = not explicit_flow_name or flow_name in local_flow_names
+        if is_internal and not include_internal:
+            continue
+        ref = (flow_name, entry_point_name)
+        if ref in seen:
+            continue
+        seen.add(ref)
+        refs.append((flow_name, entry_point_name, is_internal))
+    return refs
+
+def external_subflow_references_from_events(flow: typing.Optional[EventFlow],
+                                            events: typing.Iterable[typing.Any]) -> typing.List[typing.Tuple[str, str]]:
+    if not flow:
+        return []
+
+    source_flow_name = primary_flow_name_for_flow(flow)
+    return [
+        (flow_name, entry_point_name)
+        for flow_name, entry_point_name, _is_internal in subflow_references_from_event_records(
+            flow,
+            ((source_flow_name, event) for event in events),
+            include_internal=False,
+        )
+    ]
+
+def collect_required_external_subflow_flow_names(
+    flow: typing.Optional[EventFlow],
+    resolve_external_flow: typing.Callable[[str], typing.Optional[EventFlow]],
+) -> typing.List[str]:
+    required_flow_names: typing.List[str] = []
+    seen_flow_names: typing.Set[str] = set()
+    pending_flow_names: typing.List[str] = []
+    scanned_flow_names: typing.Set[str] = set()
+
+    def add_required_flow_name(flow_name: str) -> None:
+        display_name = flow_filename_name_for_path(flow_name)
+        if not display_name or display_name in seen_flow_names:
+            return
+        seen_flow_names.add(display_name)
+        required_flow_names.append(display_name)
+
+    def queue_flow(flow_name: str) -> None:
+        add_required_flow_name(flow_name)
+        pending_flow_names.append(flow_name)
+
+    for flow_name, _entry_point_name, _is_internal in subflow_references_from_event_records(
+        flow,
+        collect_all_flow_event_records(flow),
+        include_internal=False,
+    ):
+        queue_flow(flow_name)
+
+    while pending_flow_names:
+        flow_name = pending_flow_names.pop(0)
+        flow_key = flow_filename_name_for_path(flow_name)
+        if flow_key in scanned_flow_names:
+            continue
+        scanned_flow_names.add(flow_key)
+
+        external_flow = resolve_external_flow(flow_name)
+        if not external_flow:
+            continue
+        for nested_flow_name, _nested_entry_point_name, _is_internal in subflow_references_from_event_records(
+            external_flow,
+            collect_all_flow_event_records(external_flow),
+            include_internal=False,
+        ):
+            queue_flow(nested_flow_name)
+
+    return required_flow_names
+
+def format_game_analyzed_subflow_list(flow_names: typing.Iterable[str]) -> str:
+    lines = ['  SubFlowList:']
+    lines.extend(f'    - {flow_name}' for flow_name in flow_names)
+    return '\n'.join(lines)
+
+def format_required_subflows_explainer(flow_count: int) -> str:
+    return (
+        'Note: The highest known number of subflows without a crash is 32.\n\n'
+        f'Count: {flow_count} / 32'
+    )
+
+def required_subflows_limit_warning_text() -> str:
+    return (
+        'This actor will likely crash the game when it spawns.\n\n'
+        'The highest proven number of subflows is 32.'
+    )
 
 def _path_from_parts(parts: typing.Sequence[str]) -> typing.Optional[Path]:
     if not parts:
@@ -1179,11 +1348,6 @@ QToolButton:hover, QToolButton:pressed {
         self.event_param_visible_action.setChecked(False)
         self.event_param_visible_action.triggered.connect(self.onEventParamVisibilityChanged)
         view_menu.addAction(self.event_param_visible_action)
-        self.event_message_visible_action = q.QAction('Show message &text', self)
-        self.event_message_visible_action.setCheckable(True)
-        self.event_message_visible_action.setChecked(False)
-        self.event_message_visible_action.triggered.connect(self.onEventMessageVisibilityChanged)
-        view_menu.addAction(self.event_message_visible_action)
         view_menu.addSeparator()
         self.reload_graph_action = q.QAction('&Reload graph', self)
         self.reload_graph_action.setShortcut('Ctrl+Shift+R')
@@ -1208,6 +1372,9 @@ QToolButton:hover, QToolButton:pressed {
         self.open_current_mals_action = q.QAction('Open Mals', self)
         self.open_current_mals_action.triggered.connect(self.onOpenCurrentMals)
         self.current_mals_menu.addAction(self.open_current_mals_action)
+        self.reload_current_mals_action = q.QAction('Reload Mals', self)
+        self.reload_current_mals_action.triggered.connect(self.onReloadCurrentMals)
+        self.current_mals_menu.addAction(self.reload_current_mals_action)
         self.mals_menu.addMenu(self.current_mals_menu)
         self.mals_locale_menu = q.QMenu(f'Locale: {DEFAULT_MALS_LOCALE}', self)
         self._mals_locale_actions: typing.Dict[str, q.QAction] = {}
@@ -1225,6 +1392,11 @@ QToolButton:hover, QToolButton:pressed {
         self.mals_menu.addAction(self.manual_mals_action)
         self.mals_menu.addSeparator()
 
+        self.event_message_visible_action = q.QAction('Show message &texts', self)
+        self.event_message_visible_action.setCheckable(True)
+        self.event_message_visible_action.setChecked(False)
+        self.event_message_visible_action.triggered.connect(self.onEventMessageVisibilityChanged)
+        self.mals_menu.addAction(self.event_message_visible_action)
         self.render_mals_tags_as_styling_action = q.QAction('Turn style tags into formatting', self)
         self.render_mals_tags_as_styling_action.setCheckable(True)
         self.render_mals_tags_as_styling_action.setChecked(True)
@@ -1247,11 +1419,31 @@ QToolButton:hover, QToolButton:pressed {
         self.mals_menu.addAction(self.show_mals_text_bubble_breaks_action)
         self.mals_menu.addSeparator()
 
-        self.mals_diagnostics_menu = q.QMenu('Diagnostics', self)
-        self.show_missing_mals_report_action = q.QAction('Show Missing MSBT/Message IDs...', self)
+        self.event_talk_params_menu = q.QMenu('EventTalk parameters', self)
+        self.event_talk_params_group = q.QActionGroup(self)
+        self.event_talk_params_group.setExclusive(True)
+        self.event_talk_params_show_action = q.QAction('Show', self)
+        self.event_talk_params_show_action.setCheckable(True)
+        self.event_talk_params_show_action.setChecked(True)
+        self.event_talk_params_show_action.triggered.connect(self.onEventTalkParamVisibilityChanged)
+        self.event_talk_params_group.addAction(self.event_talk_params_show_action)
+        self.event_talk_params_menu.addAction(self.event_talk_params_show_action)
+        self.event_talk_params_hide_action = q.QAction('Hide', self)
+        self.event_talk_params_hide_action.setCheckable(True)
+        self.event_talk_params_hide_action.triggered.connect(self.onEventTalkParamVisibilityChanged)
+        self.event_talk_params_group.addAction(self.event_talk_params_hide_action)
+        self.event_talk_params_menu.addAction(self.event_talk_params_hide_action)
+        self.mals_menu.addMenu(self.event_talk_params_menu)
+
+        diagnostics_menu = menu.addMenu('&Diagnostics')
+        self.show_missing_mals_report_action = q.QAction('Show missing MSBT/message IDs', self)
+        self.show_missing_mals_report_action.setEnabled(False)
         self.show_missing_mals_report_action.triggered.connect(self.onShowMissingMalsReport)
-        self.mals_diagnostics_menu.addAction(self.show_missing_mals_report_action)
-        self.mals_menu.addMenu(self.mals_diagnostics_menu)
+        diagnostics_menu.addAction(self.show_missing_mals_report_action)
+        self.list_required_subflows_action = q.QAction('List all required subflows', self)
+        self.list_required_subflows_action.setEnabled(False)
+        self.list_required_subflows_action.triggered.connect(self.onListRequiredSubflows)
+        diagnostics_menu.addAction(self.list_required_subflows_action)
 
         settings_menu = menu.addMenu('&Settings')
         self.set_totk_romfs_path_action = q.QAction('Set TOTK romfs path...', self)
@@ -1550,6 +1742,9 @@ QToolButton:hover, QToolButton:pressed {
         self.event_name_visible_action.setChecked(settings.value('visible_names', False, type=bool))
         self.event_param_visible_action.setChecked(settings.value('visible_params', False, type=bool))
         self.event_message_visible_action.setChecked(settings.value('visible_messages', False, type=bool))
+        event_talk_params_visible = settings.value('event_talk_params_visible', True, type=bool)
+        self.event_talk_params_show_action.setChecked(event_talk_params_visible)
+        self.event_talk_params_hide_action.setChecked(not event_talk_params_visible)
         settings.endGroup()
 
         settings.beginGroup('paths')
@@ -1609,6 +1804,7 @@ QToolButton:hover, QToolButton:pressed {
         settings.setValue('visible_names', self.event_name_visible_action.isChecked())
         settings.setValue('visible_params', self.event_param_visible_action.isChecked())
         settings.setValue('visible_messages', self.event_message_visible_action.isChecked())
+        settings.setValue('event_talk_params_visible', self.event_talk_params_show_action.isChecked())
         settings.endGroup()
 
         settings.beginGroup('appearance')
@@ -1687,6 +1883,9 @@ QToolButton:hover, QToolButton:pressed {
         self.open_current_mals_action.setToolTip(tooltip)
         self.open_mals_folder_action.setEnabled(can_open_folder)
         self.open_mals_folder_action.setToolTip(current_folder or tooltip)
+        can_reload_current = has_path and bool(self.flow)
+        self.reload_current_mals_action.setEnabled(can_reload_current)
+        self.reload_current_mals_action.setToolTip(tooltip if has_path else 'No Mals/MSBT archive selected.')
         self.show_missing_mals_report_action.setEnabled(bool(self.flow))
 
     def updateMalsLocaleActions(self) -> None:
@@ -1849,6 +2048,9 @@ QToolButton:hover, QToolButton:pressed {
         if current_path:
             qg.QDesktopServices.openUrl(qc.QUrl.fromLocalFile(current_path))
 
+    def onReloadCurrentMals(self) -> None:
+        self.applyMalsSelection(force_reload=True, report_errors=True)
+
     def onShowMissingMalsReport(self) -> None:
         report = self.flowchart_view.buildMessageLookupReport()
         dialog = q.QDialog(self, qc.Qt.WindowTitleHint | qc.Qt.WindowSystemMenuHint)
@@ -1864,14 +2066,66 @@ QToolButton:hover, QToolButton:pressed {
         layout.addWidget(buttons)
         dialog.exec_()
 
-    def currentModEventflowDirectories(self) -> typing.List[Path]:
-        directories: typing.List[Path] = []
-        if self.flow_path:
-            directories.append(Path(self.flow_path).parent)
+    def collectRequiredSubflowFlowNames(self, flow_path: str = '') -> typing.List[str]:
+        loaded_flows: typing.Dict[str, typing.Optional[EventFlow]] = {}
+        effective_flow_path = flow_path or self.flow_path
 
-        owner_root = infer_eventflow_owner_root(self.flow_path)
+        def resolve_external_flow(flow_name: str) -> typing.Optional[EventFlow]:
+            path = self.findEventflowInCurrentMod(flow_name, effective_flow_path) or self.findEventflowInVanillaRomfs(flow_name)
+            if not path:
+                return None
+            key = os.path.normcase(os.path.normpath(path))
+            if key in loaded_flows:
+                return loaded_flows[key]
+            try:
+                flow = EventFlow()
+                util.read_flow(path, flow)
+            except Exception:
+                loaded_flows[key] = None
+                return None
+            loaded_flows[key] = flow
+            return flow
+
+        return collect_required_external_subflow_flow_names(self.flow, resolve_external_flow)
+
+    def onListRequiredSubflows(self) -> None:
+        flow_names = self.collectRequiredSubflowFlowNames()
+        report = format_game_analyzed_subflow_list(flow_names)
+        dialog = q.QDialog(self, qc.Qt.WindowTitleHint | qc.Qt.WindowSystemMenuHint)
+        dialog.setWindowTitle('Required subflows')
+        dialog.resize(520, 360)
+        layout = q.QVBoxLayout(dialog)
+        label = q.QLabel(format_required_subflows_explainer(len(flow_names)), dialog)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        editor = q.QPlainTextEdit(dialog)
+        editor.setReadOnly(True)
+        editor.setPlainText(report)
+        editor.selectAll()
+        layout.addWidget(editor)
+        buttons = q.QDialogButtonBox(q.QDialogButtonBox.Close, dialog)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if len(flow_names) > 32:
+            qc.QTimer.singleShot(
+                250,
+                lambda: q.QMessageBox.warning(
+                    dialog,
+                    'Required subflows',
+                    required_subflows_limit_warning_text(),
+                ),
+            )
+        dialog.exec_()
+
+    def currentModEventflowDirectories(self, flow_path: str = '') -> typing.List[Path]:
+        directories: typing.List[Path] = []
+        effective_flow_path = flow_path or self.flow_path
+        if effective_flow_path:
+            directories.append(Path(effective_flow_path).parent)
+
+        owner_root = infer_eventflow_owner_root(effective_flow_path)
         if owner_root:
-            flow_parts = [part.lower() for part in Path(self.flow_path).parts]
+            flow_parts = [part.lower() for part in Path(effective_flow_path).parts]
             if 'romfs' in flow_parts:
                 directories.append(owner_root / 'romfs' / 'Event' / 'EventFlow')
             directories.append(owner_root / 'Event' / 'EventFlow')
@@ -1886,8 +2140,8 @@ QToolButton:hover, QToolButton:pressed {
             unique_directories.append(directory)
         return unique_directories
 
-    def findEventflowInCurrentMod(self, flow_name: str) -> str:
-        for directory in self.currentModEventflowDirectories():
+    def findEventflowInCurrentMod(self, flow_name: str, flow_path: str = '') -> str:
+        for directory in self.currentModEventflowDirectories(flow_path):
             path = find_eventflow_file_in_directory(directory, flow_name)
             if path:
                 return path
@@ -2083,6 +2337,8 @@ QToolButton:hover, QToolButton:pressed {
         self.reorder_event_parameters_action.setEnabled(bool(self.flow))
         self.add_event_action.setEnabled(bool(self.flow) and bool(self.flow_path))
         self.add_fork_action.setEnabled(bool(self.flow) and bool(self.flow_path))
+        self.show_missing_mals_report_action.setEnabled(bool(self.flow))
+        self.list_required_subflows_action.setEnabled(bool(self.flow))
 
     def renameFlow(self) -> None:
         if not self.flow or not self.flow.flowchart:
@@ -2131,10 +2387,21 @@ QToolButton:hover, QToolButton:pressed {
         )
         return ret == q.QMessageBox.Ok
 
+    def warnExcessiveRequiredSubflowsForSave(self, path: str) -> bool:
+        flow_names = self.collectRequiredSubflowFlowNames(path)
+        if len(flow_names) > 32:
+            q.QMessageBox.warning(
+                self,
+                'Required subflows',
+                required_subflows_limit_warning_text(),
+            )
+        return True
+
     def confirmSaveChecks(self, path: str) -> bool:
         return (
             self.confirmFilenameFlowNameMatchForSave(path) and
-            self.confirmInternalSubflowTargetsForSave()
+            self.confirmInternalSubflowTargetsForSave() and
+            self.warnExcessiveRequiredSubflowsForSave(path)
         )
 
     def confirmVanillaRomfsSaveTarget(self, path: str) -> str:
@@ -2277,6 +2544,7 @@ QToolButton:hover, QToolButton:pressed {
         try:
             self.onEventNameVisibilityChanged()
             self.onEventParamVisibilityChanged()
+            self.onEventTalkParamVisibilityChanged()
             self.onEventMessageVisibilityChanged()
             self.onEventTagVisibilityChanged()
         finally:
@@ -2307,6 +2575,12 @@ QToolButton:hover, QToolButton:pressed {
     def onEventParamVisibilityChanged(self) -> None:
         visible = self.event_param_visible_action.isChecked()
         self.flowchart_view.eventParamVisibilityChanged.emit(visible)
+        if not self._syncing_flowchart_visibility:
+            self.flowchart_view.refreshDisplayOptionsPreservingSelection()
+
+    def onEventTalkParamVisibilityChanged(self) -> None:
+        visible = self.event_talk_params_show_action.isChecked()
+        self.flowchart_view.eventTalkParamVisibilityChanged.emit(visible)
         if not self._syncing_flowchart_visibility:
             self.flowchart_view.refreshDisplayOptionsPreservingSelection()
 

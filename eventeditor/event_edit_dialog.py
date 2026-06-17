@@ -607,6 +607,7 @@ class ActorRelatedEventEditDialog(q.QDialog):
             return
 
         kind = self.currentLibraryKind()
+        initial_entry_name = self.currentNodeTypeName()
         force_rebuild = False
         while True:
             result = self.buildLibraryResult(actor, kind, force_rebuild)
@@ -621,7 +622,7 @@ class ActorRelatedEventEditDialog(q.QDialog):
                 q.QMessageBox.information(self, 'Event library', message)
                 return
 
-            dialog = EventLibraryDialog(self, actor.identifier.name, kind, result)
+            dialog = EventLibraryDialog(self, actor.identifier.name, kind, result, initial_entry_name)
             dialog.goToExampleRequested.connect(self.onLibraryExampleGoToRequested)
             if not dialog.exec_():
                 if dialog.rebuildRequested():

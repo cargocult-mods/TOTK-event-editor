@@ -87,10 +87,30 @@ text, .edgeLabel {
   fill: #c4371f;
 }
 
+.node.elided > :first-child {
+  fill: #464b52;
+  stroke: #8b929d;
+  stroke-dasharray: 5 3;
+}
+.node.elided .label {
+  fill: #d9dee5;
+  font-style: italic;
+}
+
 .edgePath path.path {
   stroke: #888;
   fill: none;
   stroke-width: 1.5px;
+}
+
+.edgePath.elided-edge path.path {
+  stroke: #b3bac3;
+  stroke-dasharray: 6 4;
+  stroke-width: 1.3px;
+}
+
+.edgePath.elided-edge marker {
+  fill: #b3bac3;
 }
 
 .edgePath marker {

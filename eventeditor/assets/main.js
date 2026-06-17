@@ -2,6 +2,7 @@ let graph;
 let widget;
 let eventNamesVisible = false;
 let eventParamVisible = false;
+let eventTalkParamVisible = true;
 let eventMessagesVisible = false;
 let actionsProhibited = false;
 let isDeleting = false;
@@ -29,6 +30,8 @@ const MESSAGE_BUBBLE_SOURCE_LINE_LIMIT = 3;
 const GRAPH_FIT_PADDING = 40;
 const GRAPH_FIT_MAX_SCALE = 1;
 const READABLE_NODE_SCALE = 1;
+const ELIDED_NODE_WIDTH = 72;
+const ELIDED_NODE_HEIGHT = 32;
 const MESSAGE_SEPARATOR = '-'.repeat(30);
 const MESSAGE_BLANK_LINE = '\u00A0';
 const MESSAGE_BUBBLE_BREAK_LINE = '\u2063';
@@ -50,6 +53,8 @@ const MESSAGE_TAG_COLOR_PALETTE = [
   '#fffeed', '#f06a6a', '#72d180', '#67b7ff', '#f2c55c', '#d49bff',
   '#74d7d0', '#ff9e64', '#cfd7df', '#9ec5ff', '#ffd1dc', '#d5f06a',
 ];
+const MALS_MESSAGE_ACTIONS = new Set(['EventTalk', 'EventTriggerBalloonMessage']);
+const MESSAGE_ID_PARAM_KEYS = ['MessageId', 'MessageID'];
 
 const WHITELISTED_PARAMS = new Set(['MessageId', 'ASName']);
 
@@ -590,6 +595,28 @@ function getChoiceItems(node) {
   return node.data._choice_texts;
 }
 
+function isMalsMessageActionNode(node) {
+  return !!(node && node.node_type === 'action' && node.data && MALS_MESSAGE_ACTIONS.has(node.data.action));
+}
+
+function getNodeMessageId(node) {
+  const params = node && node.data ? node.data.params : null;
+  if (!params) {
+    return null;
+  }
+  for (const key of MESSAGE_ID_PARAM_KEYS) {
+    const value = params[key];
+    if (typeof value === 'string' && value) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function shouldShowNodeParams(node) {
+  return eventParamVisible && !(isMalsMessageActionNode(node) && !eventTalkParamVisible);
+}
+
 function getNodeLabel(node) {
   const prefix = eventNamesVisible ? `${node.data.name}\n` : '';
   let label = `${node.id}`;
@@ -613,12 +640,13 @@ function getNodeLabel(node) {
     label = `${prefix}${node.data.res_flowchart_name}\n<${node.data.entry_point_name}>`;
   }
 
-  if (eventParamVisible && node.data.params) {
+  const showNodeParams = shouldShowNodeParams(node);
+  if (showNodeParams && node.data.params) {
     for (const [key, value] of Object.entries(node.data.params)) {
       if (key === 'IsWaitFinish') {
         continue;
       }
-      if (key === 'MessageId') {
+      if (MESSAGE_ID_PARAM_KEYS.includes(key)) {
         label = appendMessageIdBlock(label, value);
         continue;
       }
@@ -626,9 +654,10 @@ function getNodeLabel(node) {
     }
   }
 
-  if (eventMessagesVisible && node.data && node.data.params && node.data.params.MessageId) {
-    if (!eventParamVisible) {
-      label = appendMessageIdBlock(label, node.data.params.MessageId);
+  const messageId = getNodeMessageId(node);
+  if (eventMessagesVisible && messageId) {
+    if (!showNodeParams) {
+      label = appendMessageIdBlock(label, messageId);
     }
     const messageText = getMessageText(node);
     if (messageText) {
@@ -682,6 +711,7 @@ function handleNodeContextMenu(id) {
       addAction('Add fork...', () => widget.addForkAt(idx));
       actions.push({ divider: true });
 
+      addAction('Rename node...', () => widget.renameEvent(idx));
       if (!classes.includes('fork') && !classes.includes('join')) {
         addAction('Edit event...', () => widget.editEvent(idx));
       }
@@ -740,8 +770,10 @@ function handleNodeContextMenu(id) {
   }
 
   addAction('Select connected events', () => graph.selectConnected(id));
-  if (hasHiddenEntryPoints) {
-    addAction('Show all events', () => widget.showAllEventsFromNode(idx));
+  actions.push({ divider: true });
+  addAction('Show paths to this node', () => graph.renderIncomingPathsTo(id));
+  if (graph.hasActiveGraphFilter() || hasHiddenEntryPoints) {
+    addAction('Show all events', () => showAllGraphEvents(idx));
   } else {
     addAction('Show only connected events', () => widget.showOnlyConnectedEvents(idx));
   }
@@ -777,9 +809,27 @@ function handleBackgroundContextMenu() {
     actions.push({ divider: true });
   }
 
-  if (hasHiddenEntryPoints) {
-    addAction('Show all events', () => widget.showAllEvents());
+  if (graph.hasActiveGraphFilter() || hasHiddenEntryPoints) {
+    addAction('Show all events', () => showAllGraphEvents());
   }
+
+  return actions;
+}
+
+function handleElidedNodeContextMenu(node) {
+  const actions = [];
+  const sourceId = node ? node.elidedSourceId : null;
+  const hiddenBranchCount = node ? parseInt(node.hiddenBranchCount, 10) : 0;
+  const clipKind = node ? node.clipKind : null;
+  const addAction = (name, fn) => actions.push({ title: name, action: () => { setTimeout(fn, 60) } });
+
+  if (sourceId != null) {
+    const branchLabel = clipKind === 'children'
+      ? (hiddenBranchCount === 1 ? 'Show 1 child' : `Show ${hiddenBranchCount} children`)
+      : (hiddenBranchCount === 1 ? 'Show 1 other branch' : `Show ${hiddenBranchCount} other branches`);
+    addAction(branchLabel, () => graph.expandIncomingPathBranchesFrom(sourceId));
+  }
+  addAction('Show all events', () => showAllGraphEvents());
 
   return actions;
 }
@@ -1209,7 +1259,11 @@ class Renderer {
         closestId = id;
       }
     });
-    return closestId == null ? null : parseInt(closestId, 10);
+    if (closestId == null) {
+      return null;
+    }
+    const numericId = parseInt(closestId, 10);
+    return Number.isNaN(numericId) ? null : numericId;
   }
 
   isElementVisible(id, margin=40) {
@@ -1332,6 +1386,14 @@ class Renderer {
     this._fitNodeBoxesToLabels();
     this.svgGroup.selectAll('.node')
       .on('click', (id) => {
+        const node = g.node(id);
+        if (node && node.synthetic) {
+          if (node.elidedSourceId != null) {
+            graph.expandIncomingPathBranchesFrom(node.elidedSourceId);
+          }
+          d3.event.stopPropagation();
+          return;
+        }
         if (isMultiSelectEvent(d3.event)) {
           this.toggleSelection(id, g);
         } else {
@@ -1346,6 +1408,10 @@ class Renderer {
         }
 
         const node = g.node(id);
+        if (node && node.synthetic) {
+          d3.event.stopPropagation();
+          return;
+        }
         const classes = node.class.split(' ');
         if (classes.includes('entry')) {
           widget.renameEntryPoint(parseInt(id, 10));
@@ -1357,6 +1423,13 @@ class Renderer {
         d3.event.stopPropagation();
       })
       .on('contextmenu', (id) => {
+        const node = g.node(id);
+        if (node && node.synthetic) {
+          d3.contextMenu(() => handleElidedNodeContextMenu(node)).call(this, id);
+          clampContextMenuToViewport();
+          d3.event.stopPropagation();
+          return;
+        }
         this.selectForContextMenu(id, g);
         d3.contextMenu(handleNodeContextMenu).call(this, id);
         clampContextMenuToViewport();
@@ -1382,6 +1455,9 @@ class Graph {
     this.data = null;
     this.renderer = new Renderer();
     this.persistentComponentRootName = null;
+    this.persistentIncomingPathTargetName = null;
+    this.persistentIncomingPathTargetId = null;
+    this.incomingPathExpandedSourceIds = new Set();
   }
 
   update(data) {
@@ -1418,7 +1494,16 @@ class Graph {
   }
 
   render(transitionMs=GRAPH_TRANSITION_MS) {
-    if (this.hasPersistentComponentFilter()) {
+    let renderGraph = this.g;
+    if (this.hasPersistentIncomingPathFilter()) {
+      const incomingPathTargetId = this.findPersistentIncomingPathTargetId();
+      if (incomingPathTargetId != null) {
+        renderGraph = this.buildIncomingPathGraph(incomingPathTargetId);
+        this.renderer.nodeWhitelist = null;
+      } else {
+        this.clearIncomingPathFilter();
+      }
+    } else if (this.hasPersistentComponentFilter()) {
       const componentIds = this.findPersistentComponentIds();
       if (componentIds) {
         this.renderer.nodeWhitelist = componentIds;
@@ -1430,7 +1515,7 @@ class Graph {
       this.renderer.nodeWhitelist = null;
     }
 
-    this.renderer.render(this.g, transitionMs);
+    this.renderer.render(renderGraph, transitionMs);
     refreshGraphSearch(false);
   }
 
@@ -1440,6 +1525,26 @@ class Graph {
 
   clearPersistentComponentFilter() {
     this.persistentComponentRootName = null;
+  }
+
+  hasPersistentIncomingPathFilter() {
+    return this.persistentIncomingPathTargetName != null || this.persistentIncomingPathTargetId != null;
+  }
+
+  hasActiveGraphFilter() {
+    return this.hasPersistentComponentFilter() || this.hasPersistentIncomingPathFilter();
+  }
+
+  clearIncomingPathFilter() {
+    this.persistentIncomingPathTargetName = null;
+    this.persistentIncomingPathTargetId = null;
+    this.incomingPathExpandedSourceIds.clear();
+  }
+
+  clearGraphViewFilters() {
+    this.clearPersistentComponentFilter();
+    this.clearIncomingPathFilter();
+    this.renderer.nodeWhitelist = null;
   }
 
   _findNodeIdByName(name) {
@@ -1473,11 +1578,383 @@ class Graph {
     return this.findNodeComponentIds(rootId);
   }
 
+  findPersistentIncomingPathTargetId() {
+    const byName = this._findNodeIdByName(this.persistentIncomingPathTargetName);
+    if (byName != null) {
+      return byName;
+    }
+    const fallbackId = this.persistentIncomingPathTargetId == null ? null : `${this.persistentIncomingPathTargetId}`;
+    return fallbackId != null && this.g && this.g.node(fallbackId) ? fallbackId : null;
+  }
+
+  _edgeKey(edge) {
+    if (!edge) {
+      return '';
+    }
+    return edge.name != null ? `${edge.name}` : `edge-${edge.v}-${edge.w}`;
+  }
+
+  _edgeInfo(edge) {
+    const edgeData = this.g.edge(edge) || {};
+    return {
+      id: this._edgeKey(edge),
+      source: `${edge.v}`,
+      target: `${edge.w}`,
+      virtual: !!edgeData.virtual,
+      graphEdge: edge,
+      data: edgeData,
+    };
+  }
+
+  _edgeInfos() {
+    if (!this.g) {
+      return [];
+    }
+    return this.g.edges().map((edge) => this._edgeInfo(edge));
+  }
+
+  _nodeExists(nodeId) {
+    return !!(this.g && this.g.node(`${nodeId}`));
+  }
+
+  findIncomingPathNodeIds(targetId) {
+    const targetKey = `${targetId}`;
+    if (!this._nodeExists(targetKey)) {
+      return null;
+    }
+
+    const incomingByTarget = new Map();
+    for (const edge of this._edgeInfos()) {
+      if (!incomingByTarget.has(edge.target)) {
+        incomingByTarget.set(edge.target, []);
+      }
+      incomingByTarget.get(edge.target).push(edge);
+    }
+
+    const visited = new Set();
+    const queue = [targetKey];
+    while (queue.length) {
+      const currentId = `${queue.shift()}`;
+      if (visited.has(currentId)) {
+        continue;
+      }
+      visited.add(currentId);
+
+      for (const edge of incomingByTarget.get(currentId) || []) {
+        if (!visited.has(edge.source)) {
+          queue.push(edge.source);
+        }
+      }
+    }
+    return visited;
+  }
+
+  _comparePathNodeIds(a, b) {
+    const aNum = parseInt(a, 10);
+    const bNum = parseInt(b, 10);
+    if (!Number.isNaN(aNum) && !Number.isNaN(bNum) && aNum !== bNum) {
+      return aNum - bNum;
+    }
+    return `${a}`.localeCompare(`${b}`);
+  }
+
+  buildIncomingPathView(targetId) {
+    const targetKey = `${targetId}`;
+    const pathIds = this.findIncomingPathNodeIds(targetKey);
+    if (!pathIds) {
+      return null;
+    }
+
+    const outgoingBySource = new Map();
+    const allOutgoingBySource = new Map();
+    const incomingByTarget = new Map();
+    for (const edge of this._edgeInfos()) {
+      if (edge.virtual) {
+        continue;
+      }
+      if (!allOutgoingBySource.has(edge.source)) {
+        allOutgoingBySource.set(edge.source, []);
+      }
+      allOutgoingBySource.get(edge.source).push(edge);
+      if (!pathIds.has(edge.source) || !pathIds.has(edge.target)) {
+        continue;
+      }
+      if (!outgoingBySource.has(edge.source)) {
+        outgoingBySource.set(edge.source, []);
+      }
+      outgoingBySource.get(edge.source).push(edge);
+      if (!incomingByTarget.has(edge.target)) {
+        incomingByTarget.set(edge.target, []);
+      }
+      incomingByTarget.get(edge.target).push(edge);
+    }
+
+    const scoreMemo = new Map();
+    const scoreNode = (nodeId, visiting = new Set()) => {
+      const nodeKey = `${nodeId}`;
+      if (nodeKey === targetKey) {
+        return 0;
+      }
+      if (scoreMemo.has(nodeKey)) {
+        return scoreMemo.get(nodeKey);
+      }
+      if (visiting.has(nodeKey)) {
+        return -Infinity;
+      }
+
+      visiting.add(nodeKey);
+      let bestScore = -Infinity;
+      for (const edge of outgoingBySource.get(nodeKey) || []) {
+        const childScore = scoreNode(edge.target, visiting);
+        if (childScore !== -Infinity) {
+          bestScore = Math.max(bestScore, childScore + 1);
+        }
+      }
+      visiting.delete(nodeKey);
+      scoreMemo.set(nodeKey, bestScore);
+      return bestScore;
+    };
+
+    const bestOutgoingEdge = (sourceId) => {
+      const candidates = outgoingBySource.get(`${sourceId}`) || [];
+      if (!candidates.length) {
+        return null;
+      }
+      return candidates.slice().sort((a, b) => {
+        const scoreDiff = scoreNode(b.target) - scoreNode(a.target);
+        if (scoreDiff) {
+          return scoreDiff;
+        }
+        return this._comparePathNodeIds(a.target, b.target);
+      })[0];
+    };
+
+    const visibleIds = new Set([targetKey]);
+    const visibleEdgeIds = new Set();
+    const revealLongestPathFrom = (startId) => {
+      let currentId = `${startId}`;
+      const guard = new Set();
+      while (currentId && !guard.has(currentId)) {
+        guard.add(currentId);
+        visibleIds.add(currentId);
+        if (currentId === targetKey) {
+          break;
+        }
+        const edge = bestOutgoingEdge(currentId);
+        if (!edge) {
+          break;
+        }
+        visibleEdgeIds.add(edge.id);
+        currentId = edge.target;
+      }
+    };
+
+    const rootCandidates = [...pathIds]
+      .filter((nodeId) => nodeId !== targetKey && !(incomingByTarget.get(nodeId) || []).length);
+    const startCandidates = rootCandidates.length
+      ? rootCandidates
+      : [...pathIds].filter((nodeId) => nodeId !== targetKey);
+    const startId = startCandidates.sort((a, b) => {
+      const scoreDiff = scoreNode(b) - scoreNode(a);
+      if (scoreDiff) {
+        return scoreDiff;
+      }
+      return this._comparePathNodeIds(a, b);
+    })[0];
+
+    if (startId != null) {
+      revealLongestPathFrom(startId);
+    }
+
+    for (const sourceId of this.incomingPathExpandedSourceIds) {
+      const sourceKey = `${sourceId}`;
+      if (!visibleIds.has(sourceKey)) {
+        continue;
+      }
+      for (const edge of allOutgoingBySource.get(sourceKey) || []) {
+        if (!this._nodeExists(edge.target)) {
+          continue;
+        }
+        visibleEdgeIds.add(edge.id);
+        visibleIds.add(edge.target);
+        revealLongestPathFrom(edge.target);
+      }
+    }
+
+    return { visibleIds, visibleEdgeIds, pathIds, outgoingBySource, allOutgoingBySource };
+  }
+
+  buildIncomingPathVisibleNodeIds(targetId) {
+    const view = this.buildIncomingPathView(targetId);
+    if (!view) {
+      return null;
+    }
+    return view.visibleIds;
+  }
+
+  _incomingPathHiddenOutgoingEdges(sourceId, view) {
+    return (view.allOutgoingBySource.get(`${sourceId}`) || []).filter((edge) => {
+      return !edge.virtual
+        && edge.source === `${sourceId}`
+        && this._nodeExists(edge.target)
+        && !view.visibleEdgeIds.has(edge.id);
+    });
+  }
+
+  _incomingPathHiddenBranchHasEvents(edge, sourceId, view) {
+    const sourceKey = `${sourceId}`;
+    const visited = new Set([sourceKey]);
+    const queue = [`${edge.target}`];
+    while (queue.length) {
+      const currentId = `${queue.shift()}`;
+      if (visited.has(currentId)) {
+        continue;
+      }
+      visited.add(currentId);
+
+      if (view.visibleIds.has(currentId)) {
+        continue;
+      }
+
+      const node = this.g.node(currentId);
+      const classes = node && typeof node.class === 'string' ? node.class.split(' ') : [];
+      if (node && !classes.includes('join')) {
+        return true;
+      }
+
+      for (const nextEdge of view.allOutgoingBySource.get(currentId) || []) {
+        if (nextEdge.virtual || !this._nodeExists(nextEdge.target)) {
+          continue;
+        }
+        queue.push(nextEdge.target);
+      }
+    }
+    return false;
+  }
+
+  _incomingPathFirstVisibleMergeTarget(startId, sourceId, view) {
+    const startKey = `${startId}`;
+    const sourceKey = `${sourceId}`;
+    if (!view.pathIds.has(startKey)) {
+      return null;
+    }
+
+    const visited = new Set([sourceKey]);
+    const queue = [startKey];
+    while (queue.length) {
+      const currentId = `${queue.shift()}`;
+      if (visited.has(currentId)) {
+        continue;
+      }
+      visited.add(currentId);
+
+      if (currentId !== sourceKey && view.visibleIds.has(currentId)) {
+        return currentId;
+      }
+
+      for (const edge of view.allOutgoingBySource.get(currentId) || []) {
+        if (edge.virtual || visited.has(edge.target) || !view.pathIds.has(edge.target)) {
+          continue;
+        }
+        queue.push(edge.target);
+      }
+    }
+    return null;
+  }
+
+  _incomingPathHiddenMergeTargets(sourceId, hiddenOutgoingEdges, view) {
+    const targets = [];
+    const seen = new Set();
+    for (const edge of hiddenOutgoingEdges) {
+      const mergeTargetId = this._incomingPathFirstVisibleMergeTarget(edge.target, sourceId, view);
+      if (mergeTargetId == null || seen.has(mergeTargetId)) {
+        continue;
+      }
+      seen.add(mergeTargetId);
+      targets.push(mergeTargetId);
+    }
+    return targets;
+  }
+
+  buildIncomingPathGraph(targetId) {
+    const targetKey = `${targetId}`;
+    const view = this.buildIncomingPathView(targetKey);
+    if (!view) {
+      return this.g;
+    }
+
+    const visibleGraph = new graphlib.Graph({ multigraph: true });
+    visibleGraph.setGraph({});
+    for (const nodeId of view.visibleIds) {
+      const node = this.g.node(nodeId);
+      if (node) {
+        visibleGraph.setNode(nodeId, Object.assign({}, node));
+      }
+    }
+
+    for (const edge of this._edgeInfos()) {
+      if (view.visibleEdgeIds.has(edge.id)) {
+        visibleGraph.setEdge(edge.graphEdge, Object.assign({}, edge.data));
+      }
+    }
+
+    const visibleElementIds = new Set(visibleGraph.nodes().map((nodeId) => `${nodeId}`));
+    for (const sourceId of view.visibleIds) {
+      const isTargetChildrenClip = sourceId === targetKey;
+      const hiddenOutgoingEdges = this._incomingPathHiddenOutgoingEdges(sourceId, view)
+        .filter((edge) => isTargetChildrenClip || this._incomingPathHiddenBranchHasEvents(edge, sourceId, view));
+      const hiddenBranchCount = hiddenOutgoingEdges.length;
+      if (!hiddenBranchCount) {
+        continue;
+      }
+
+      const stubId = `__elided_out_${sourceId}`;
+      if (!visibleElementIds.has(stubId)) {
+        const label = isTargetChildrenClip
+          ? (hiddenBranchCount === 1 ? '(1 child)' : `(${hiddenBranchCount} children)`)
+          : (hiddenBranchCount === 1 ? '(1 other)' : `(${hiddenBranchCount} others)`);
+        visibleGraph.setNode(stubId, {
+          label,
+          rawLabel: label,
+          'class': 'elided',
+          id: `n${stubId}`,
+          idx: null,
+          name: label,
+          synthetic: true,
+          elidedSourceId: sourceId,
+          hiddenBranchCount,
+          clipKind: isTargetChildrenClip ? 'children' : 'branches',
+          width: Math.max(ELIDED_NODE_WIDTH, (label.length * 8) + 18),
+          height: ELIDED_NODE_HEIGHT,
+        });
+        visibleElementIds.add(stubId);
+      }
+      visibleGraph.setEdge(sourceId, stubId, {
+        labelType: 'html',
+        label: '',
+        'class': `edge-${sourceId}-${stubId} elided-edge`,
+        virtual: false,
+      }, `edge-elided-out-${sourceId}`);
+
+      for (const mergeTargetId of this._incomingPathHiddenMergeTargets(sourceId, hiddenOutgoingEdges, view)) {
+        visibleGraph.setEdge(stubId, mergeTargetId, {
+          labelType: 'html',
+          label: '',
+          'class': `edge-${stubId}-${mergeTargetId} elided-edge elided-merge-edge`,
+          virtual: false,
+        }, `edge-elided-merge-${sourceId}-${mergeTargetId}`);
+      }
+    }
+
+    return visibleGraph;
+  }
+
   renderOnlyConnected(v) {
     const selected = this.renderer.getSelection();
     if (v == null) {
       this.clearPersistentComponentFilter();
     } else {
+      this.clearIncomingPathFilter();
       const node = this.g ? this.g.node(`${v}`) : null;
       this.persistentComponentRootName = node ? node.name : null;
     }
@@ -1500,9 +1977,91 @@ class Graph {
     this.renderer.selectMany(ids, this.g);
   }
 
+  renderIncomingPathsTo(v) {
+    const targetId = `${v}`;
+    const node = this.g ? this.g.node(targetId) : null;
+    if (!node) {
+      return;
+    }
+    this.clearPersistentComponentFilter();
+    this.incomingPathExpandedSourceIds.clear();
+    this.persistentIncomingPathTargetId = targetId;
+    this.persistentIncomingPathTargetName = node.name || null;
+    this.render(0);
+    setTimeout(() => {
+      if (this.renderer.getElement(targetId)) {
+        const visibleGraph = this.buildIncomingPathGraph(targetId);
+        this.renderer.select(targetId, visibleGraph, false);
+        this.renderer.scrollTo(targetId, true, 0, READABLE_NODE_SCALE);
+      }
+    }, 20);
+  }
+
+  expandIncomingPathBranchesFrom(sourceId) {
+    const sourceKey = `${sourceId}`;
+    if (!this.hasPersistentIncomingPathFilter() || !this._nodeExists(sourceKey)) {
+      return;
+    }
+
+    const viewport = this.renderer.getViewport();
+    const sourceElement = this.renderer.getElement(sourceKey);
+    const focusPoint = getElementCenterInViewport(sourceElement);
+    this.incomingPathExpandedSourceIds.add(sourceKey);
+    this.render(0);
+    setTimeout(() => restoreViewportAroundFocus(viewport, sourceKey, focusPoint), 20);
+  }
+
 }
 
 graph = new Graph();
+
+function showAllGraphEvents(revealNodeId = null) {
+  const fallbackRevealId = revealNodeId != null
+    ? revealNodeId
+    : (graph.findPersistentIncomingPathTargetId() || graph.renderer.getSelection());
+  graph.clearGraphViewFilters();
+  const numericRevealId = fallbackRevealId == null ? null : parseInt(fallbackRevealId, 10);
+  if (hasHiddenEntryPoints && widget) {
+    if (numericRevealId != null && !Number.isNaN(numericRevealId)) {
+      widget.showAllEventsFromNode(numericRevealId);
+    } else {
+      widget.showAllEvents();
+    }
+    return;
+  }
+
+  graph.render(0);
+  if (numericRevealId != null && !Number.isNaN(numericRevealId)) {
+    setTimeout(() => {
+      if (graph.renderer.getElement(numericRevealId)) {
+        graph.renderer.select(numericRevealId, graph.g, false);
+        graph.renderer.scrollTo(numericRevealId, true, 0, READABLE_NODE_SCALE);
+      }
+    }, 20);
+  }
+}
+
+function restoreViewportAroundFocus(viewport, focusNodeId, focusPoint) {
+  if (!graph || !graph.renderer) {
+    return;
+  }
+  if (viewport) {
+    graph.renderer.restoreViewport(viewport);
+  }
+  if (focusNodeId == null || !focusPoint) {
+    return;
+  }
+  const focusedElement = graph.renderer.getElement(focusNodeId);
+  const currentCenter = getElementCenterInViewport(focusedElement);
+  if (!currentCenter) {
+    return;
+  }
+  const nextTranslate = graph.renderer.zoom.translate().slice();
+  nextTranslate[0] += focusPoint.x - currentCenter.x;
+  nextTranslate[1] += focusPoint.y - currentCenter.y;
+  graph.renderer.zoom.translate(nextTranslate);
+  graph.renderer.updateTransform();
+}
 
 function pushNodeParams(parts, node) {
   if (!node || !node.data || !node.data.params) {
@@ -1796,6 +2355,10 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
   widget = channel.objects.widget;
 
   function select(id) {
+    if (graph.hasActiveGraphFilter() && !graph.renderer.getElement(id)) {
+      graph.clearGraphViewFilters();
+      graph.render(0);
+    }
     if (graph.hasPersistentComponentFilter()) {
       graph.renderOnlyConnected(id);
       graph.renderer.select(id, graph.g);
@@ -1806,8 +2369,8 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
   }
 
   function reveal(id) {
-    if (graph.hasPersistentComponentFilter() && !graph.renderer.getElement(id)) {
-      graph.clearPersistentComponentFilter();
+    if (graph.hasActiveGraphFilter() && !graph.renderer.getElement(id)) {
+      graph.clearGraphViewFilters();
       graph.render();
     }
     graph.renderer.select(id, graph.g);
@@ -1866,7 +2429,7 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
   });
 
   widget.fileLoaded.connect(() => {
-    graph.clearPersistentComponentFilter();
+    graph.clearGraphViewFilters();
     graph.renderer.clearSelection();
     preservedViewport = null;
     resetViewportOnNextLoad = true;
@@ -1881,8 +2444,8 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
   });
 
   widget.instantRevealRequested.connect((id) => {
-    if (graph.hasPersistentComponentFilter() && !graph.renderer.getElement(id)) {
-      graph.clearPersistentComponentFilter();
+    if (graph.hasActiveGraphFilter() && !graph.renderer.getElement(id)) {
+      graph.clearGraphViewFilters();
       graph.render(0);
     }
     graph.renderer.select(id, graph.g);
@@ -1906,6 +2469,10 @@ new QWebChannel(qt.webChannelTransport, (channel) => {
 
   widget.eventParamVisibilityChanged.connect((visible) => {
     eventParamVisible = visible;
+  });
+
+  widget.eventTalkParamVisibilityChanged.connect((visible) => {
+    eventTalkParamVisible = visible;
   });
 
   widget.eventMessageVisibilityChanged.connect((visible) => {

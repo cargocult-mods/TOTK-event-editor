@@ -33,6 +33,7 @@ import PyQt5.QtGui as qg # type: ignore
 import PyQt5.QtWidgets as q # type: ignore
 
 EVENT_CLIPBOARD_PREFIX = 'eventeditor-event-nodes:v1:'
+MESSAGE_ID_PARAM_NAMES = ('MessageId', 'MessageID')
 
 class EntryPointVisibilityDelegate(q.QStyledItemDelegate):
     def __init__(self, parent=None) -> None:
@@ -82,6 +83,7 @@ class FlowchartWebObject(qc.QObject):
     fileLoaded = qc.pyqtSignal(EventFlow)
     eventNameVisibilityChanged = qc.pyqtSignal(bool)
     eventParamVisibilityChanged = qc.pyqtSignal(bool)
+    eventTalkParamVisibilityChanged = qc.pyqtSignal(bool)
     eventMessageVisibilityChanged = qc.pyqtSignal(bool)
     eventTagVisibilityChanged = qc.pyqtSignal(bool)
     entryPointFilterStateChanged = qc.pyqtSignal(bool)
@@ -127,6 +129,10 @@ class FlowchartWebObject(qc.QObject):
     @qc.pyqtSlot(int)
     def editEvent(self, node_id: int):
         self.view.webEditEvent(int(node_id))
+
+    @qc.pyqtSlot(int)
+    def renameEvent(self, node_id: int):
+        self.view.webRenameEvent(int(node_id))
 
     @qc.pyqtSlot(int)
     def addEntryPoint(self, node_id: int):
@@ -220,6 +226,7 @@ class FlowchartView(q.QWidget):
     selectRequested = qc.pyqtSignal(int)
     eventNameVisibilityChanged = qc.pyqtSignal(bool)
     eventParamVisibilityChanged = qc.pyqtSignal(bool)
+    eventTalkParamVisibilityChanged = qc.pyqtSignal(bool)
     eventMessageVisibilityChanged = qc.pyqtSignal(bool)
     eventTagVisibilityChanged = qc.pyqtSignal(bool)
 
@@ -269,6 +276,7 @@ class FlowchartView(q.QWidget):
         self.eventNameVisibilityChanged.connect(self.web_object.eventNameVisibilityChanged)
         self.eventParamVisibilityChanged.connect(self.onEventParamVisibilityChanged)
         self.eventParamVisibilityChanged.connect(self.web_object.eventParamVisibilityChanged)
+        self.eventTalkParamVisibilityChanged.connect(self.web_object.eventTalkParamVisibilityChanged)
         self.eventMessageVisibilityChanged.connect(self.onEventMessageVisibilityChanged)
         self.eventMessageVisibilityChanged.connect(self.web_object.eventMessageVisibilityChanged)
         self.eventTagVisibilityChanged.connect(self.onEventTagVisibilityChanged)
@@ -586,11 +594,24 @@ class FlowchartView(q.QWidget):
                 raise
             return True
 
+    def reloadMessageLookup(self, refresh: bool = True, report_errors: bool = False) -> bool:
+        changed = self.updateMessageLookup(force=True, report_errors=report_errors)
+        if refresh:
+            self.refreshGraphPresentation()
+        return changed
+
     def refreshGraphPresentation(self) -> None:
         self.suppress_reload_reselect = True
         self.web_object.fastGraphReloadRequested.emit()
         self.web_object.preserveViewportRequested.emit()
         self.web_object.flowDataChanged.emit()
+
+    def _messageIdFromParams(self, params: typing.Mapping[str, typing.Any]) -> typing.Optional[str]:
+        for key in MESSAGE_ID_PARAM_NAMES:
+            value = params.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return None
 
     def _collectMessageIds(self) -> typing.Set[str]:
         if not self.flow_data.flow or not self.flow_data.flow.flowchart:
@@ -601,8 +622,8 @@ class FlowchartView(q.QWidget):
             params = getattr(event.data, 'params', None)
             if not params or not getattr(params, 'data', None):
                 continue
-            value = params.data.get('MessageId')
-            if isinstance(value, str) and value:
+            value = self._messageIdFromParams(params.data)
+            if value:
                 message_ids.add(value)
             choice_count = params.data.get('ChoiceNumber')
             if not isinstance(choice_count, int) or choice_count <= 0:
@@ -721,9 +742,7 @@ class FlowchartView(q.QWidget):
             params = node_data.get('params')
             if not isinstance(params, dict):
                 continue
-            message_id = params.get('MessageId')
-            if not isinstance(message_id, str):
-                message_id = None
+            message_id = self._messageIdFromParams(params)
             if message_id:
                 message_text = self._message_lookup.get(message_id)
                 if message_text:
@@ -942,6 +961,7 @@ class FlowchartView(q.QWidget):
         self.flow_data.flowDataChanged.emit(FlowDataChangeReason.EventParameters)
 
     def reload(self) -> None:
+        self.reloadMessageLookup(refresh=False, report_errors=False)
         self.view.reload()
 
     def currentSelectedNodeId(self) -> typing.Optional[int]:
@@ -1521,6 +1541,35 @@ class FlowchartView(q.QWidget):
         if idx < 0:
             return
         show_event_editor(self, self.flow_data, idx)
+
+    def webRenameEvent(self, event_idx: int) -> None:
+        if event_idx < 0 or not self.flow_data.flow or not self.flow_data.flow.flowchart:
+            return
+
+        flowchart = self.flow_data.flow.flowchart
+        if not (0 <= event_idx < len(flowchart.events)):
+            return
+
+        event = flowchart.events[event_idx]
+        new_name, ok = q.QInputDialog.getText(
+            self,
+            'Rename node',
+            'Enter a new node name.',
+            q.QLineEdit.Normal,
+            event.name,
+        )
+        if not ok or not new_name:
+            return
+        if new_name == event.name:
+            return
+        if any(other is not event and other and other.name == new_name for other in flowchart.events):
+            q.QMessageBox.critical(self, 'Cannot rename', f'"{new_name}" is already used by another node.')
+            return
+
+        self.prepareNodeEditCommit(event, event_idx)
+        event.name = new_name
+        model_index = self.flow_data.event_model.createIndex(event_idx, 0)
+        self.flow_data.event_model.dataChanged.emit(model_index, model_index)
 
     def webAddEntryPoint(self, event_idx: int) -> None:
         if event_idx < 0:

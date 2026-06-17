@@ -11,9 +11,387 @@ from eventeditor.event_library import (
     SOURCE_GROUP_VANILLA,
     format_library_value,
     source_group_title,
+    value_type_name,
 )
 import PyQt5.QtCore as qc # type: ignore
 import PyQt5.QtWidgets as q # type: ignore
+
+
+def observed_parameter_value_records(entry: EventLibraryEntry,
+                                     parameter_name: str,
+                                     groups: typing.Optional[typing.Iterable[str]] = None
+                                     ) -> typing.List[typing.Dict[str, typing.Any]]:
+    group_set = set(groups) if groups is not None else None
+    records = {}  # type: typing.Dict[str, typing.Dict[str, typing.Any]]
+    for example in entry.all_observed_examples():
+        group = example.source_group()
+        if group_set is not None and group not in group_set:
+            continue
+        params = example.params if isinstance(example.params, dict) else {}
+        for key, value in params.items():
+            if str(key) != parameter_name:
+                continue
+            value_key = format_library_value(value, quote_strings=True)
+            record = records.get(value_key)
+            if record is None:
+                record = {
+                    'value_key': value_key,
+                    'value': value,
+                    'value_text': format_library_value(value, quote_strings=False),
+                    'type_text': value_type_name(value),
+                    'count': 0,
+                    'groups': set(),
+                    'examples': [],
+                }
+                records[value_key] = record
+            record['count'] += 1
+            record['groups'].add(group)
+            record['examples'].append(example)
+
+    return sorted(
+        records.values(),
+        key=lambda record: (-int(record['count']), str(record['value_text']).lower()),
+    )
+
+
+def _source_group_summary(groups: typing.Iterable[str]) -> str:
+    ordered_groups = [SOURCE_GROUP_CURRENT, SOURCE_GROUP_MOD, SOURCE_GROUP_VANILLA]
+    group_set = set(groups)
+    labels = [source_group_title(group) for group in ordered_groups if group in group_set]
+    labels.extend(source_group_title(group) for group in sorted(group_set - set(ordered_groups)))
+    return ', '.join(labels)
+
+
+ROLE_VALUE_RECORD = qc.Qt.UserRole + 1
+ROLE_VALUE_KEY = qc.Qt.UserRole + 2
+
+
+class SortAwareTreeWidgetItem(q.QTreeWidgetItem):
+    def __lt__(self, other) -> bool:
+        tree = self.treeWidget()
+        column = tree.sortColumn() if tree else 0
+        left = self.data(column, qc.Qt.UserRole)
+        right = other.data(column, qc.Qt.UserRole)
+        if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+            return left < right
+        left_text = str(left if left is not None else self.text(column)).lower()
+        right_text = str(right if right is not None else other.text(column)).lower()
+        return left_text < right_text
+
+
+class ParameterObservedValuesDialog(q.QDialog):
+    goToExampleRequested = qc.pyqtSignal(object)
+
+    def __init__(self,
+                 parent,
+                 entry: EventLibraryEntry,
+                 parameter_name: str,
+                 mod_context_enabled: bool) -> None:
+        super().__init__(parent, qc.Qt.WindowTitleHint | qc.Qt.WindowSystemMenuHint | qc.Qt.WindowCloseButtonHint)
+        self.setWindowTitle('Observed parameter values')
+        self.resize(980, 560)
+        self.entry = entry
+        self.parameter_name = parameter_name
+        self.mod_context_enabled = mod_context_enabled
+        self._selected_record = None  # type: typing.Optional[typing.Dict[str, typing.Any]]
+        self._value_sort_column = 2
+        self._value_sort_order = qc.Qt.DescendingOrder
+
+        layout = q.QVBoxLayout(self)
+        header = q.QLabel('{} / {} observed values'.format(entry.name, parameter_name))
+        header.setStyleSheet('font-weight: bold;')
+        header.setTextInteractionFlags(qc.Qt.TextSelectableByMouse)
+        layout.addWidget(header)
+
+        self.search_edit = q.QLineEdit()
+        self.search_edit.setPlaceholderText('Search values or examples')
+        self.search_edit.textChanged.connect(self.populateRows)
+        layout.addWidget(self.search_edit)
+
+        splitter = q.QSplitter(qc.Qt.Horizontal)
+        self.values_tree = q.QTreeWidget()
+        self.values_tree.setColumnCount(6)
+        self.values_tree.setHeaderLabels(['Value', 'Type', 'Uses', 'File', 'Mod', 'Vanilla'])
+        self.values_tree.setRootIsDecorated(False)
+        self.values_tree.setUniformRowHeights(True)
+        self.values_tree.setSelectionMode(q.QAbstractItemView.SingleSelection)
+        self.values_tree.setTextElideMode(qc.Qt.ElideRight)
+        self.values_tree.setSortingEnabled(True)
+        self.values_tree.header().setSectionsClickable(True)
+        self.values_tree.header().sortIndicatorChanged.connect(self.onValueSortChanged)
+        self.values_tree.header().setStretchLastSection(False)
+        self.values_tree.header().setSectionResizeMode(0, q.QHeaderView.Stretch)
+        for column in range(1, self.values_tree.columnCount()):
+            self.values_tree.header().setSectionResizeMode(column, q.QHeaderView.Fixed)
+        self.values_tree.currentItemChanged.connect(self.onValueItemChanged)
+        splitter.addWidget(self.values_tree)
+        splitter.addWidget(self.createExamplePane())
+        splitter.setSizes([460, 520])
+        layout.addWidget(splitter, stretch=1)
+
+        self.summary_label = q.QLabel()
+        self.summary_label.setTextInteractionFlags(qc.Qt.TextSelectableByMouse)
+        layout.addWidget(self.summary_label)
+
+        buttons = q.QDialogButtonBox(q.QDialogButtonBox.Close)
+        self.copy_values_button = buttons.addButton('Copy Values', q.QDialogButtonBox.ActionRole)
+        self.copy_values_button.clicked.connect(self.copyVisibleValues)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.populateRows()
+
+    def createExamplePane(self) -> q.QWidget:
+        pane = q.QWidget()
+        layout = q.QVBoxLayout(pane)
+        layout.setContentsMargins(8, 0, 0, 0)
+        layout.setSpacing(8)
+
+        self.value_title = q.QLabel()
+        self.value_title.setStyleSheet('font-weight: bold;')
+        self.value_title.setTextInteractionFlags(qc.Qt.TextSelectableByMouse)
+        layout.addWidget(self.value_title)
+
+        self.value_source_label = q.QLabel()
+        self.value_source_label.setWordWrap(True)
+        self.value_source_label.setTextInteractionFlags(qc.Qt.TextSelectableByMouse)
+        layout.addWidget(self.value_source_label)
+
+        examples_header = q.QHBoxLayout()
+        self.value_examples_label = q.QLabel('Observed examples')
+        self.value_examples_label.setStyleSheet('font-weight: bold;')
+        examples_header.addWidget(self.value_examples_label)
+        examples_header.addStretch(1)
+        layout.addLayout(examples_header)
+
+        filter_layout = q.QHBoxLayout()
+        self.current_check = q.QCheckBox('Current')
+        self.current_check.setChecked(True)
+        self.current_check.toggled.connect(self.populateExamples)
+        filter_layout.addWidget(self.current_check)
+        self.mod_check = q.QCheckBox('Mod')
+        self.mod_check.setChecked(True)
+        self.mod_check.setVisible(self.mod_context_enabled)
+        self.mod_check.toggled.connect(self.populateExamples)
+        filter_layout.addWidget(self.mod_check)
+        self.vanilla_check = q.QCheckBox('Vanilla')
+        self.vanilla_check.setChecked(True)
+        self.vanilla_check.toggled.connect(self.populateExamples)
+        filter_layout.addWidget(self.vanilla_check)
+        filter_layout.addStretch(1)
+        layout.addLayout(filter_layout)
+
+        self.example_search_edit = q.QLineEdit()
+        self.example_search_edit.setPlaceholderText('Search examples')
+        self.example_search_edit.textChanged.connect(self.populateExamples)
+        layout.addWidget(self.example_search_edit)
+
+        self.value_examples_list = q.QListWidget()
+        self.value_examples_list.setSelectionMode(q.QAbstractItemView.SingleSelection)
+        self.value_examples_list.setContextMenuPolicy(qc.Qt.CustomContextMenu)
+        self.value_examples_list.customContextMenuRequested.connect(self.onValueExamplesContextMenu)
+        layout.addWidget(self.value_examples_list, stretch=1)
+        return pane
+
+    def selectedExampleGroups(self) -> typing.List[str]:
+        groups = []
+        if self.current_check.isChecked():
+            groups.append(SOURCE_GROUP_CURRENT)
+        if self.mod_context_enabled and self.mod_check.isChecked():
+            groups.append(SOURCE_GROUP_MOD)
+        if self.vanilla_check.isChecked():
+            groups.append(SOURCE_GROUP_VANILLA)
+        return groups
+
+    def onValueSortChanged(self, column: int, order: qc.Qt.SortOrder) -> None:
+        self._value_sort_column = column
+        self._value_sort_order = order
+
+    def _recordSearchText(self, record: typing.Dict[str, typing.Any]) -> str:
+        pieces = [
+            str(record.get('value_text', '')),
+            str(record.get('type_text', '')),
+            _source_group_summary(record.get('groups', set())),
+        ]
+        for example in record.get('examples', []):
+            pieces.extend([example.display_label(), example.source_file, example.event_name])
+        return ' '.join(pieces).lower()
+
+    def visibleRecords(self) -> typing.List[typing.Dict[str, typing.Any]]:
+        records = observed_parameter_value_records(self.entry, self.parameter_name)
+        needle = self.search_edit.text().strip().lower()
+        if not needle:
+            return records
+        return [record for record in records if needle in self._recordSearchText(record)]
+
+    def populateRows(self, *args) -> None:
+        current_item = self.values_tree.currentItem()
+        current_key = current_item.data(0, ROLE_VALUE_KEY) if current_item else None
+        self.values_tree.setSortingEnabled(False)
+        self.values_tree.clear()
+        all_records = observed_parameter_value_records(self.entry, self.parameter_name)
+        records = self.visibleRecords()
+        target_item = None
+        for record in records:
+            groups = record.get('groups', set())
+            item = SortAwareTreeWidgetItem([
+                str(record.get('value_text', '')),
+                str(record.get('type_text', '')),
+                str(record.get('count', 0)),
+                'Y' if SOURCE_GROUP_CURRENT in groups else '',
+                'Y' if SOURCE_GROUP_MOD in groups else '',
+                'Y' if SOURCE_GROUP_VANILLA in groups else '',
+            ])
+            item.setData(0, ROLE_VALUE_RECORD, record)
+            item.setData(0, ROLE_VALUE_KEY, record.get('value_key', ''))
+            item.setData(0, qc.Qt.UserRole, str(record.get('value_text', '')).lower())
+            item.setData(1, qc.Qt.UserRole, str(record.get('type_text', '')).lower())
+            item.setData(2, qc.Qt.UserRole, int(record.get('count', 0)))
+            item.setData(3, qc.Qt.UserRole, 1 if SOURCE_GROUP_CURRENT in groups else 0)
+            item.setData(4, qc.Qt.UserRole, 1 if SOURCE_GROUP_MOD in groups else 0)
+            item.setData(5, qc.Qt.UserRole, 1 if SOURCE_GROUP_VANILLA in groups else 0)
+            for column in range(1, self.values_tree.columnCount()):
+                item.setTextAlignment(column, qc.Qt.AlignCenter)
+            tooltip_lines = [
+                'Value: {}'.format(record.get('value_text', '')),
+                'Uses: {}'.format(record.get('count', 0)),
+                'Sources: {}'.format(_source_group_summary(record.get('groups', set()))),
+            ]
+            examples = record.get('examples', [])
+            if examples:
+                tooltip_lines.append('')
+                tooltip_lines.append('Examples:')
+                tooltip_lines.extend(example.display_label() for example in examples[:25])
+                if len(examples) > 25:
+                    tooltip_lines.append('...and {} more'.format(len(examples) - 25))
+            for column in range(self.values_tree.columnCount()):
+                item.setToolTip(column, '\n'.join(tooltip_lines))
+            self.values_tree.addTopLevelItem(item)
+            if current_key and record.get('value_key') == current_key:
+                target_item = item
+        self.fitCompactValueColumns()
+        self.values_tree.setSortingEnabled(True)
+        self.values_tree.sortItems(self._value_sort_column, self._value_sort_order)
+        if target_item is None and self.values_tree.topLevelItemCount():
+            target_item = self.values_tree.topLevelItem(0)
+        if target_item is not None:
+            self.values_tree.setCurrentItem(target_item)
+        else:
+            self.setSelectedValueRecord(None)
+        self.copy_values_button.setEnabled(bool(records))
+        if len(records) == len(all_records):
+            self.summary_label.setText('{} observed value{}.'.format(
+                len(records),
+                '' if len(records) == 1 else 's',
+            ))
+        else:
+            self.summary_label.setText('{} of {} observed values shown.'.format(len(records), len(all_records)))
+
+    def fitCompactValueColumns(self) -> None:
+        metrics = self.values_tree.fontMetrics()
+        for column in range(1, self.values_tree.columnCount()):
+            widest = 0
+            for row in range(self.values_tree.topLevelItemCount()):
+                widest = max(widest, metrics.horizontalAdvance(self.values_tree.topLevelItem(row).text(column)))
+            self.values_tree.setColumnWidth(column, max(24, widest + 22))
+
+    def onValueItemChanged(self, current, previous) -> None:
+        record = current.data(0, ROLE_VALUE_RECORD) if current else None
+        self.setSelectedValueRecord(record if isinstance(record, dict) else None)
+
+    def setSelectedValueRecord(self, record: typing.Optional[typing.Dict[str, typing.Any]]) -> None:
+        self._selected_record = record
+        if not record:
+            self.value_title.setText('')
+            self.value_source_label.setText('')
+            self.value_examples_label.setText('Observed examples')
+            self.value_examples_list.clear()
+            return
+        self.value_title.setText(str(record.get('value_text', '')))
+        self.value_source_label.setText('Found in: {}; {} observed use{}.'.format(
+            _source_group_summary(record.get('groups', set())) or 'unknown source',
+            record.get('count', 0),
+            '' if record.get('count', 0) == 1 else 's',
+        ))
+        self.updateExampleFilterControls(record)
+        self.populateExamples()
+
+    def updateExampleFilterControls(self, record: typing.Optional[typing.Dict[str, typing.Any]]) -> None:
+        counts = {SOURCE_GROUP_CURRENT: 0, SOURCE_GROUP_MOD: 0, SOURCE_GROUP_VANILLA: 0}
+        for example in (record or {}).get('examples', []):
+            group = example.source_group()
+            counts[group] = counts.get(group, 0) + 1
+        self.current_check.setText('Current ({})'.format(counts.get(SOURCE_GROUP_CURRENT, 0)))
+        self.mod_check.setText('Mod ({})'.format(counts.get(SOURCE_GROUP_MOD, 0)))
+        self.mod_check.setVisible(self.mod_context_enabled)
+        self.vanilla_check.setText('Vanilla ({})'.format(counts.get(SOURCE_GROUP_VANILLA, 0)))
+
+    def exampleSearchText(self, example: EventLibraryExample) -> str:
+        pieces = [example.display_label(), example.source_file, example.event_name, example.source_label]
+        if example.params:
+            for key, value in example.params.items():
+                pieces.append(str(key))
+                pieces.append(format_library_value(value, quote_strings=False))
+        return ' '.join(pieces).lower()
+
+    def populateExamples(self, *args) -> None:
+        self.value_examples_list.clear()
+        record = self._selected_record
+        if not record:
+            self.value_examples_label.setText('Observed examples')
+            return
+
+        groups = set(self.selectedExampleGroups())
+        source_examples = [
+            example for example in record.get('examples', [])
+            if example.source_group() in groups
+        ]
+        source_count = len(source_examples)
+        needle = self.example_search_edit.text().strip().lower()
+        if needle:
+            examples = [example for example in source_examples if needle in self.exampleSearchText(example)]
+        else:
+            examples = source_examples
+        group_label = ', '.join(source_group_title(group) for group in self.selectedExampleGroups()) if groups else 'no sources'
+        if len(examples) != source_count:
+            self.value_examples_label.setText('Observed examples ({} of {}; {})'.format(
+                len(examples),
+                source_count,
+                group_label,
+            ))
+        else:
+            self.value_examples_label.setText('Observed examples ({}; {})'.format(source_count, group_label))
+
+        for example in examples:
+            item = q.QListWidgetItem(example.display_label())
+            item.setData(qc.Qt.UserRole, example)
+            details = []
+            if example.params:
+                details.append('Parameters:')
+                for key, value in example.params.items():
+                    details.append('{}: {}'.format(key, format_library_value(value, quote_strings=False)))
+            item.setToolTip('\n'.join(details) if details else '(no parameters)')
+            self.value_examples_list.addItem(item)
+
+    def onValueExamplesContextMenu(self, pos) -> None:
+        item = self.value_examples_list.itemAt(pos)
+        if not item:
+            return
+        example = item.data(qc.Qt.UserRole)
+        menu = q.QMenu(self)
+        go_to_action = menu.addAction('Go to Event')
+        go_to_action.setEnabled(bool(
+            example and getattr(example, 'source_file', '') and getattr(example, 'event_name', '')
+        ))
+        action = menu.exec_(self.value_examples_list.viewport().mapToGlobal(pos))
+        if action == go_to_action and go_to_action.isEnabled():
+            self.goToExampleRequested.emit(example)
+
+    def copyVisibleValues(self) -> None:
+        values = []
+        for row in range(self.values_tree.topLevelItemCount()):
+            values.append(self.values_tree.topLevelItem(row).text(0))
+        q.QApplication.clipboard().setText('\n'.join(values))
 
 
 class EventLibraryDialog(q.QDialog):
@@ -23,13 +401,15 @@ class EventLibraryDialog(q.QDialog):
                  parent,
                  actor_name: str,
                  kind: str,
-                 result: EventLibraryResult) -> None:
+                 result: EventLibraryResult,
+                 initial_entry_name: str = '') -> None:
         super().__init__(parent, qc.Qt.WindowTitleHint | qc.Qt.WindowSystemMenuHint | qc.Qt.WindowCloseButtonHint)
         self.setWindowTitle('Event library')
         self.resize(980, 560)
         self.actor_name = actor_name
         self.kind = kind
         self.result = result
+        self.initial_entry_name = (initial_entry_name or '').strip()
         self.mod_context_enabled = getattr(result, 'mod_context_enabled', True)
         self._selected_entry = None  # type: typing.Optional[EventLibraryEntry]
         self._rebuild_requested = False
@@ -123,8 +503,23 @@ class EventLibraryDialog(q.QDialog):
             self.tree.addTopLevelItem(item)
 
         self.fitCompactTreeColumns()
-        if self.tree.topLevelItemCount():
-            self.tree.setCurrentItem(self.tree.topLevelItem(0))
+        self.selectInitialEntry()
+
+    def selectInitialEntry(self) -> None:
+        target_item = None
+        if self.initial_entry_name:
+            target_name = self.initial_entry_name.strip()
+            for row in range(self.tree.topLevelItemCount()):
+                item = self.tree.topLevelItem(row)
+                entry = item.data(0, qc.Qt.UserRole)
+                if isinstance(entry, EventLibraryEntry) and entry.name.strip() == target_name:
+                    target_item = item
+                    break
+        if target_item is None and self.tree.topLevelItemCount():
+            target_item = self.tree.topLevelItem(0)
+        if target_item is not None:
+            self.tree.setCurrentItem(target_item)
+            self.tree.scrollToItem(target_item, q.QAbstractItemView.PositionAtCenter)
 
     def parameterTooltip(self, entry: EventLibraryEntry) -> str:
         if not entry.parameters:
@@ -177,6 +572,8 @@ class EventLibraryDialog(q.QDialog):
         self.parameter_table.setSelectionBehavior(q.QAbstractItemView.SelectRows)
         self.parameter_table.setSelectionMode(q.QAbstractItemView.SingleSelection)
         self.parameter_table.setAlternatingRowColors(True)
+        self.parameter_table.setContextMenuPolicy(qc.Qt.CustomContextMenu)
+        self.parameter_table.customContextMenuRequested.connect(self.onParameterContextMenu)
         self.parameter_table.horizontalHeader().setSectionResizeMode(q.QHeaderView.ResizeToContents)
         self.parameter_table.horizontalHeader().setSectionResizeMode(2, q.QHeaderView.Stretch)
         self.parameter_table.setSizePolicy(q.QSizePolicy.Expanding, q.QSizePolicy.Fixed)
@@ -297,6 +694,8 @@ class EventLibraryDialog(q.QDialog):
             key_item = self._readonlyItem(parameter.name)
             value = parameter.seed_value()
             value_item = self._readonlyItem('' if value is None else format_library_value(value, quote_strings=False))
+            for item in (type_item, key_item, value_item):
+                item.setData(qc.Qt.UserRole, parameter.name)
             if value is not None:
                 font = value_item.font()
                 font.setItalic(True)
@@ -311,6 +710,32 @@ class EventLibraryDialog(q.QDialog):
             self.parameter_table.setItem(row, 2, value_item)
         self.parameter_table.resizeRowsToContents()
         self._fitTableToRows(self.parameter_table, len(parameters))
+
+    def onParameterContextMenu(self, pos) -> None:
+        item = self.parameter_table.itemAt(pos)
+        if not item or not self._selected_entry:
+            return
+        parameter_name = item.data(qc.Qt.UserRole)
+        if not parameter_name:
+            key_item = self.parameter_table.item(item.row(), 1)
+            parameter_name = key_item.text() if key_item else ''
+        if not parameter_name:
+            return
+
+        values = observed_parameter_value_records(self._selected_entry, str(parameter_name))
+        menu = q.QMenu(self)
+        list_values_action = menu.addAction('List observed values...')
+        list_values_action.setEnabled(bool(values))
+        action = menu.exec_(self.parameter_table.viewport().mapToGlobal(pos))
+        if action == list_values_action and list_values_action.isEnabled():
+            dialog = ParameterObservedValuesDialog(
+                self,
+                self._selected_entry,
+                str(parameter_name),
+                self.mod_context_enabled,
+            )
+            dialog.goToExampleRequested.connect(lambda example: self.goToExampleRequested.emit(example))
+            dialog.exec_()
 
     def populateCaseTable(self, entry: typing.Optional[EventLibraryEntry]) -> None:
         case_count = entry.case_count() if entry else 0

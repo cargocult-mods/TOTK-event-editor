@@ -37,12 +37,15 @@ from eventeditor.__main__ import (
     available_mals_locale_names,
     build_about_html,
     choose_mals_archive_from_directory,
+    collect_required_external_subflow_flow_names,
     current_mals_display_name,
     discover_mals_locale_names,
     find_eventflow_file_in_directory,
     find_filename_flow_name_mismatch,
     find_missing_internal_subflow_calls,
     flow_filename_name_for_path,
+    format_game_analyzed_subflow_list,
+    format_required_subflows_explainer,
     infer_eventflow_mals_dir,
     infer_eventflow_owner_root,
     infer_mals_archive_for_flow_path,
@@ -54,6 +57,7 @@ from eventeditor.__main__ import (
     normalize_display_version,
     normalize_flow_save_path,
     parse_release_version,
+    required_subflows_limit_warning_text,
     UPDATE_SUMMARY_END,
     UPDATE_SUMMARY_START,
 )
@@ -61,6 +65,7 @@ import eventeditor.actor_xml as actor_xml
 import eventeditor.container_xml as container_xml
 import eventeditor.entry_point_tree_xml as entry_point_tree_xml
 import eventeditor.event_library as event_library
+import eventeditor.event_library_dialog as event_library_dialog
 import eventeditor._version as versioneer_runtime_config
 import eventeditor.mals as mals
 import eventeditor.totk_zs as totk_zs
@@ -241,6 +246,90 @@ class ReconstructedQoLTests(unittest.TestCase):
             ['EventMissing calls DemoFlow<Missing>'],
         )
 
+    def test_required_external_subflow_list_walks_recursive_files(self):
+        def make_subflow_event(name, flow_name, entry_point_name):
+            event = Event()
+            event.name = name
+            event.data = SubFlowEvent()
+            event.data.res_flowchart_name = flow_name
+            event.data.entry_point_name = entry_point_name
+            return event
+
+        def make_flow(flow_name, entry_refs_by_name):
+            flow = EventFlow()
+            flow.name = flow_name
+            flow.flowchart = Flowchart()
+            flow.flowchart.name = flow_name
+            flow.flowchart.events = []
+            flow.flowchart.entry_points = []
+            for entry_name, refs in entry_refs_by_name.items():
+                entry_point = EntryPoint(entry_name)
+                previous_event = None
+                for index, (target_flow, target_entry) in enumerate(refs):
+                    event = make_subflow_event(f'{entry_name}_{index}', target_flow, target_entry)
+                    flow.flowchart.events.append(event)
+                    if previous_event:
+                        previous_event.data.nxt.v = event
+                    else:
+                        entry_point.main_event.v = event
+                    previous_event = event
+                flow.flowchart.entry_points.append(entry_point)
+            return flow
+
+        root = EventFlow()
+        root.name = 'RootFlow'
+        root.flowchart = Flowchart()
+        root.flowchart.name = 'RootFlow'
+        root.flowchart.events = [
+            make_subflow_event('Direct', 'CommonFlow', 'InitTalk'),
+            make_subflow_event('Duplicate', 'CommonFlow', 'InitTalk'),
+            make_subflow_event('InternalByName', 'RootFlow', 'LocalTalk'),
+            make_subflow_event('InternalBlankFlow', '', 'LocalTalk'),
+        ]
+        root.flowchart.entry_points = []
+
+        common = make_flow('CommonFlow', {
+            'InitTalk': [('', 'CommonInternal'), ('FamilyFlow', 'TBW_BS_Family_Traveler')],
+            'CommonInternal': [],
+            'Unused': [('UnusedFlow', 'ShouldNotAppear')],
+        })
+        family = make_flow('FamilyFlow', {
+            'TBW_BS_Family_Traveler': [('SoldierFlow', 'TBW_BS_Family_Soldier')],
+        })
+        soldier = make_flow('SoldierFlow', {
+            'TBW_BS_Family_Soldier': [],
+        })
+        unused = make_flow('UnusedFlow', {
+            'ShouldNotAppear': [],
+        })
+        flows = {
+            'CommonFlow': common,
+            'FamilyFlow': family,
+            'SoldierFlow': soldier,
+            'UnusedFlow': unused,
+        }
+
+        required = collect_required_external_subflow_flow_names(root, flows.get)
+        self.assertEqual(required, ['CommonFlow', 'FamilyFlow', 'UnusedFlow', 'SoldierFlow'])
+        self.assertEqual(
+            format_game_analyzed_subflow_list(required),
+            '  SubFlowList:\n'
+            '    - CommonFlow\n'
+            '    - FamilyFlow\n'
+            '    - UnusedFlow\n'
+            '    - SoldierFlow',
+        )
+        self.assertEqual(
+            format_required_subflows_explainer(len(required)),
+            'Note: The highest known number of subflows without a crash is 32.\n\n'
+            'Count: 4 / 32',
+        )
+        self.assertEqual(
+            required_subflows_limit_warning_text(),
+            'This actor will likely crash the game when it spawns.\n\n'
+            'The highest proven number of subflows is 32.',
+        )
+
     def test_mals_inference_helpers_for_romfs_layout(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'TestMod'
@@ -336,6 +425,33 @@ class ReconstructedQoLTests(unittest.TestCase):
             ),
             'Manual',
         )
+
+    def test_mals_message_lookup_accepts_message_id_alias(self):
+        from eventeditor.flowchart_view import FlowchartView
+
+        message_id = 'EventFlowMsg/CC_Test:balloon_000'
+        flow = EventFlow()
+        flow.name = 'DemoFlow'
+        flow.flowchart = Flowchart()
+        flow.flowchart.name = 'DemoFlow'
+
+        event = Event()
+        event.name = 'Event0'
+        event.data = ActionEvent()
+        event.data.params = Container()
+        event.data.params.data = {'MessageID': message_id}
+        flow.flowchart.events = [event]
+        flow.flowchart.entry_points = []
+
+        view = FlowchartView.__new__(FlowchartView)
+        view.flow_data = types.SimpleNamespace(flow=flow)
+        view._message_lookup = {message_id: 'Balloon text'}
+
+        self.assertEqual(view._collectMessageIds(), {message_id})
+
+        graph_data = [{'type': 'node', 'data': {'params': {'MessageID': message_id}}}]
+        FlowchartView._injectMessageTexts(view, graph_data)
+        self.assertEqual(graph_data[0]['data']['_message_text'], 'Balloon text')
 
     def test_available_mals_locales_include_known_totk_locales(self):
         locales = available_mals_locale_names('', '')
@@ -733,6 +849,43 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertEqual(example.display_name(), 'DmF_SY_Test / Event42')
         self.assertEqual(example.display_label(), 'DmF_SY_Test / Event42 (Vanilla flow examples)')
 
+    def test_event_library_dialog_groups_observed_parameter_values(self):
+        entry = event_library.EventLibraryEntry(event_library.EVENT_LIBRARY_ACTION, 'EventTriggerASCommand', 0)
+        entry.add_observed(
+            event_library.SOURCE_CURRENT_FILE,
+            0,
+            'Current.bfevfl',
+            'Event0',
+            {'ASCommand': 'Wait', 'Other': 1},
+        )
+        entry.add_observed(
+            event_library.SOURCE_VANILLA_OBSERVED,
+            4,
+            'VanillaA.bfevfl',
+            'Event1',
+            {'ASCommand': 'Wait'},
+        )
+        entry.add_observed(
+            event_library.SOURCE_VANILLA_OBSERVED,
+            4,
+            'VanillaB.bfevfl',
+            'Event2',
+            {'ASCommand': 'Run'},
+        )
+
+        records = event_library_dialog.observed_parameter_value_records(entry, 'ASCommand')
+        self.assertEqual([(record['value_text'], record['count']) for record in records], [('Wait', 2), ('Run', 1)])
+        self.assertEqual(records[0]['type_text'], 'String')
+        self.assertEqual(len(records[0]['examples']), 2)
+        self.assertEqual(records[0]['groups'], {event_library.SOURCE_GROUP_CURRENT, event_library.SOURCE_GROUP_VANILLA})
+
+        vanilla_records = event_library_dialog.observed_parameter_value_records(
+            entry,
+            'ASCommand',
+            [event_library.SOURCE_GROUP_VANILLA],
+        )
+        self.assertEqual([(record['value_text'], record['count']) for record in vanilla_records], [('Run', 1), ('Wait', 1)])
+
     def test_event_library_scans_actor_pack_ainb_names_without_parser(self):
         event_library.clear_event_library_cache()
         with tempfile.TemporaryDirectory() as tmp:
@@ -891,6 +1044,7 @@ class ReconstructedQoLTests(unittest.TestCase):
         source_root = Path(__file__).resolve().parents[1] / 'eventeditor'
         tool_root = Path(__file__).resolve().parents[1] / 'tools'
         main_js = Path(util.get_path('assets/main.js')).read_text(encoding='utf-8')
+        main_css = Path(util.get_path('assets/main.css')).read_text(encoding='utf-8')
         main_py = (source_root / '__main__.py').read_text(encoding='utf-8')
         flowchart_py = (source_root / 'flowchart_view.py').read_text(encoding='utf-8')
         fake_update_launcher_py = (tool_root / 'launch_fake_update_test.py').read_text(encoding='utf-8')
@@ -941,7 +1095,15 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn("('Text', 'mals')", flowchart_py)
         self.assertNotIn('Mals text', flowchart_py)
         self.assertIn("QAction('Open Mals'", main_py)
+        self.assertIn("self.reload_current_mals_action = q.QAction('Reload Mals', self)", main_py)
+        self.assertIn("self.reload_current_mals_action.triggered.connect(self.onReloadCurrentMals)", main_py)
+        self.assertIn("self.current_mals_menu.addAction(self.reload_current_mals_action)", main_py)
+        self.assertIn("def onReloadCurrentMals(self) -> None:", main_py)
+        self.assertIn("self.applyMalsSelection(force_reload=True, report_errors=True)", main_py)
+        self.assertIn("self.reload_current_mals_action.setEnabled(can_reload_current)", main_py)
         self.assertNotIn('Open Current Mals', main_py)
+        self.assertIn("self.mals_menu.addAction(self.event_message_visible_action)", main_py)
+        self.assertNotIn("view_menu.addAction(self.event_message_visible_action)", main_py)
         self.assertIn("self.mals_locale_menu = q.QMenu(f'Locale: {DEFAULT_MALS_LOCALE}'", main_py)
         self.assertIn("def setMalsLocale", main_py)
         self.assertIn("settings.setValue('locale', self._mals_locale)", main_py)
@@ -956,6 +1118,28 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertNotIn("include_text_tags", main_py)
         self.assertNotIn("'Render MSBT tags as styling'", main_py)
         self.assertIn("'Turn style tags into formatting'", main_py)
+        self.assertIn("self.event_talk_params_menu = q.QMenu('EventTalk parameters', self)", main_py)
+        self.assertIn("self.event_talk_params_group.setExclusive(True)", main_py)
+        self.assertIn("self.event_talk_params_show_action = q.QAction('Show', self)", main_py)
+        self.assertIn("self.event_talk_params_hide_action = q.QAction('Hide', self)", main_py)
+        self.assertIn("diagnostics_menu = menu.addMenu('&Diagnostics')", main_py)
+        self.assertIn("self.show_missing_mals_report_action = q.QAction('Show missing MSBT/message IDs', self)", main_py)
+        self.assertIn("self.list_required_subflows_action = q.QAction('List all required subflows', self)", main_py)
+        self.assertIn("diagnostics_menu.addAction(self.show_missing_mals_report_action)", main_py)
+        self.assertIn("diagnostics_menu.addAction(self.list_required_subflows_action)", main_py)
+        self.assertIn("def reloadMessageLookup(self, refresh: bool = True, report_errors: bool = False) -> bool:", flowchart_py)
+        self.assertIn("self.reloadMessageLookup(refresh=False, report_errors=False)", flowchart_py)
+        self.assertNotIn("self.mals_menu.addMenu(self.mals_diagnostics_menu)", main_py)
+        self.assertIn('def collectRequiredSubflowFlowNames(self, flow_path: str = \'\')', main_py)
+        self.assertIn('self.findEventflowInCurrentMod(flow_name, effective_flow_path)', main_py)
+        self.assertIn('def warnExcessiveRequiredSubflowsForSave(self, path: str) -> bool:', main_py)
+        self.assertIn('self.warnExcessiveRequiredSubflowsForSave(path)', main_py)
+        self.assertIn('Note: The highest known number of subflows without a crash is 32.', main_py)
+        self.assertIn("f'Count: {flow_count} / 32'", main_py)
+        self.assertIn('This actor will likely crash the game when it spawns.', main_py)
+        self.assertIn('The highest proven number of subflows is 32.', main_py)
+        self.assertIn('qc.QTimer.singleShot(\n                250,', main_py)
+        self.assertLess(main_py.index('qc.QTimer.singleShot(\n                250,'), main_py.rindex('dialog.exec_()'))
         self.assertNotIn("'Show non-text tags'", main_py)
         self.assertIn("'Hide non-formatting tags'", main_py)
         self.assertIn("hide_non_formatting_tags", main_py)
@@ -965,6 +1149,7 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn("'Show text bubble breaks'", main_py)
         self.assertIn("show_text_bubble_breaks", main_py)
         self.assertIn("widget.goToSubflowEntryPoint(idx)", main_js)
+        self.assertIn("addAction('Rename node...', () => widget.renameEvent(idx));", main_js)
         self.assertIn("^ChoiceLabel\\d+$", main_js)
         self.assertIn("formatNodeParamValue(value, key)", main_js)
         self.assertIn(".padStart(4, '0')", main_js)
@@ -986,7 +1171,7 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn("function appendMessageIdBlock", main_js)
         self.assertIn("appendWrappedLabelLineWithIndent(nextLabel, '  MSBT: '", main_js)
         self.assertIn("appendWrappedLabelLineWithIndent(nextLabel, '  ID:   '", main_js)
-        self.assertIn("key === 'MessageId'", main_js)
+        self.assertIn("MESSAGE_ID_PARAM_KEYS.includes(key)", main_js)
         self.assertIn("function getNodeLayoutLabel", main_js)
         self.assertIn("label: getNodeLayoutLabel(rawLabel)", main_js)
         self.assertIn("rawLabel,", main_js)
@@ -1008,6 +1193,33 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertNotIn("graph.renderer.setTranslate([20, 20])", main_js)
         self.assertNotIn("const render = dagreD3.render()", main_js)
         self.assertIn("const dagreRenderer = dagreD3.render()", main_js)
+        self.assertIn("addAction('Show paths to this node'", main_js)
+        self.assertIn("function handleElidedNodeContextMenu", main_js)
+        self.assertIn("function showAllGraphEvents", main_js)
+        self.assertIn("persistentIncomingPathTargetName", main_js)
+        self.assertIn("incomingPathExpandedSourceIds", main_js)
+        self.assertIn("graph.hasActiveGraphFilter()", main_js)
+        self.assertIn("findIncomingPathNodeIds(targetId)", main_js)
+        self.assertIn("buildIncomingPathView(targetId)", main_js)
+        self.assertIn("buildIncomingPathGraph(targetId)", main_js)
+        self.assertIn("visibleEdgeIds", main_js)
+        self.assertIn("_incomingPathHiddenOutgoingEdges(sourceId, view)", main_js)
+        self.assertIn("_incomingPathHiddenBranchHasEvents(edge, sourceId, view)", main_js)
+        self.assertIn("isTargetChildrenClip || this._incomingPathHiddenBranchHasEvents(edge, sourceId, view)", main_js)
+        self.assertIn("allOutgoingBySource", main_js)
+        self.assertIn("_incomingPathFirstVisibleMergeTarget", main_js)
+        self.assertIn("_incomingPathHiddenMergeTargets", main_js)
+        self.assertIn("edge-elided-merge-", main_js)
+        self.assertIn("elided-merge-edge", main_js)
+        self.assertIn("'(1 child)'", main_js)
+        self.assertIn("'(1 other)'", main_js)
+        self.assertIn("clipKind", main_js)
+        self.assertIn("const scoreNode = (nodeId, visiting = new Set())", main_js)
+        self.assertIn("__elided_out_", main_js)
+        self.assertIn("elidedSourceId: sourceId", main_js)
+        self.assertIn("expandIncomingPathBranchesFrom(sourceId)", main_js)
+        self.assertIn(".node.elided > :first-child", main_css)
+        self.assertIn(".edgePath.elided-edge path.path", main_css)
         self.assertIn("closestNodeIdToViewportCenter", main_js)
         self.assertIn("preservedFocusPoint = preservedFocusNodeId == null ? null : graph.renderer.viewportCenterPoint()", main_js)
         self.assertIn(r"\{\{[^{}\n]+\}\}|[ \t]+|[^\s{}]+", main_js)
@@ -1024,12 +1236,31 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn("setNonTextMessageTagsVisible", flowchart_py)
         self.assertIn("onHideNonFormattingMalsTagsChanged", main_py)
         self.assertIn("eventTagVisibilityChanged.emit(self._include_mals_text_tags)", main_py)
+        self.assertIn('eventTalkParamVisibilityChanged = qc.pyqtSignal(bool)', flowchart_py)
+        self.assertIn('eventTalkParamVisibilityChanged.connect(self.web_object.eventTalkParamVisibilityChanged)', flowchart_py)
+        self.assertIn('let eventTalkParamVisible = true;', main_js)
+        self.assertIn("const MALS_MESSAGE_ACTIONS = new Set(['EventTalk', 'EventTriggerBalloonMessage'])", main_js)
+        self.assertIn("const MESSAGE_ID_PARAM_KEYS = ['MessageId', 'MessageID']", main_js)
+        self.assertIn('function isMalsMessageActionNode(node)', main_js)
+        self.assertIn('function getNodeMessageId(node)', main_js)
+        self.assertIn('function shouldShowNodeParams(node)', main_js)
+        self.assertIn('isMalsMessageActionNode(node) && !eventTalkParamVisible', main_js)
+        self.assertIn('const showNodeParams = shouldShowNodeParams(node);', main_js)
+        self.assertIn('const messageId = getNodeMessageId(node);', main_js)
+        self.assertIn('if (!showNodeParams)', main_js)
+        self.assertIn('widget.eventTalkParamVisibilityChanged.connect((visible) => {', main_js)
+        self.assertIn('def onEventTalkParamVisibilityChanged(self) -> None:', main_py)
+        self.assertIn("settings.setValue('event_talk_params_visible'", main_py)
         self.assertIn("setMessageBlankLinesIncluded", flowchart_py)
         self.assertIn("onHideMalsBlankLinesChanged", main_py)
         self.assertIn("setMessageBubbleBreaksShown", flowchart_py)
         self.assertIn("menu.addAction('Edit', lambda checked=False: self.doubleClicked.emit())", flowchart_py)
         self.assertIn("menu.addAction('Show only selected', self.showOnlySelectedEntryPoints)", flowchart_py)
         self.assertIn("menu.addAction('Show All', lambda checked=False: self.webShowAllEvents())", flowchart_py)
+        self.assertIn('def renameEvent(self, node_id: int):', flowchart_py)
+        self.assertIn('def webRenameEvent(self, event_idx: int) -> None:', flowchart_py)
+        self.assertIn("'Rename node'", flowchart_py)
+        self.assertIn('" is already used by another node.', flowchart_py)
         self.assertIn("def showOnlySelectedEntryPoints", flowchart_py)
         self.assertIn("self.flow_data.entry_point_model.isHiddenRow(source_row)", flowchart_py)
         self.assertIn("self.flow_data.entry_point_model.setRowsHidden([source_row], False)", flowchart_py)
@@ -1199,6 +1430,8 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn('def showLibraryBuildDialog(self, library_label: str) -> q.QDialog:', event_edit_dialog_py)
         self.assertIn('Building library for "{}"...', event_edit_dialog_py)
         self.assertIn('No library entries were found for {}', event_edit_dialog_py)
+        self.assertIn('initial_entry_name = self.currentNodeTypeName()', event_edit_dialog_py)
+        self.assertIn('EventLibraryDialog(self, actor.identifier.name, kind, result, initial_entry_name)', event_edit_dialog_py)
         self.assertIn('def prepareNodeEditCommit(self) -> None:', event_edit_dialog_py)
         self.assertIn('parent.prepareNodeEditCommit(self.event, self.event_idx)', event_edit_dialog_py)
         self.assertIn('self.prepareNodeEditCommit()', event_edit_dialog_py)
@@ -1207,8 +1440,35 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn("self.button_box.addButton('Add to Actor'", event_library_dialog_py)
         self.assertIn("self.button_box.addButton('Rebuild Library'", event_library_dialog_py)
         self.assertIn('self.parameter_table = q.QTableWidget()', event_library_dialog_py)
+        self.assertIn('self.parameter_table.setContextMenuPolicy(qc.Qt.CustomContextMenu)', event_library_dialog_py)
+        self.assertIn('self.parameter_table.customContextMenuRequested.connect(self.onParameterContextMenu)', event_library_dialog_py)
+        self.assertIn('def onParameterContextMenu(self, pos) -> None:', event_library_dialog_py)
+        self.assertIn("menu.addAction('List observed values...')", event_library_dialog_py)
+        self.assertIn('class ParameterObservedValuesDialog(q.QDialog):', event_library_dialog_py)
+        self.assertIn('def observed_parameter_value_records', event_library_dialog_py)
+        self.assertIn('class SortAwareTreeWidgetItem(q.QTreeWidgetItem):', event_library_dialog_py)
+        self.assertIn('self.values_tree.setSortingEnabled(True)', event_library_dialog_py)
+        self.assertIn("self.values_tree.setHeaderLabels(['Value', 'Type', 'Uses', 'File', 'Mod', 'Vanilla'])", event_library_dialog_py)
+        self.assertIn('self.values_tree.header().setSectionResizeMode(0, q.QHeaderView.Stretch)', event_library_dialog_py)
+        self.assertIn('def fitCompactValueColumns(self) -> None:', event_library_dialog_py)
+        self.assertIn('self.values_tree.setColumnWidth(column, max(24, widest + 22))', event_library_dialog_py)
+        self.assertIn('self.values_tree.currentItemChanged.connect(self.onValueItemChanged)', event_library_dialog_py)
+        self.assertIn('def createExamplePane(self) -> q.QWidget:', event_library_dialog_py)
+        self.assertIn('self.value_examples_list = q.QListWidget()', event_library_dialog_py)
+        self.assertIn('self.value_examples_list.setContextMenuPolicy(qc.Qt.CustomContextMenu)', event_library_dialog_py)
+        self.assertIn('self.value_examples_list.customContextMenuRequested.connect(self.onValueExamplesContextMenu)', event_library_dialog_py)
+        self.assertIn('def onValueExamplesContextMenu(self, pos) -> None:', event_library_dialog_py)
+        self.assertIn('def populateExamples(self, *args) -> None:', event_library_dialog_py)
+        self.assertIn('dialog.goToExampleRequested.connect(lambda example: self.goToExampleRequested.emit(example))', event_library_dialog_py)
+        self.assertIn("buttons.addButton('Copy Values'", event_library_dialog_py)
+        self.assertIn('entry.all_observed_examples()', event_library_dialog_py)
         self.assertIn("self.tree.setHeaderLabels(['Node type', 'Params', 'Examples', 'Cases', 'File', 'Mod', 'Vanilla'])", event_library_dialog_py)
         self.assertIn('self.tree.header().setStretchLastSection(False)', event_library_dialog_py)
+        self.assertIn("initial_entry_name: str = ''", event_library_dialog_py)
+        self.assertIn("self.initial_entry_name = (initial_entry_name or '').strip()", event_library_dialog_py)
+        self.assertIn('def selectInitialEntry(self) -> None:', event_library_dialog_py)
+        self.assertIn('entry.name.strip() == target_name', event_library_dialog_py)
+        self.assertIn('self.tree.scrollToItem(target_item, q.QAbstractItemView.PositionAtCenter)', event_library_dialog_py)
         self.assertIn("self.mod_context_enabled = getattr(result, 'mod_context_enabled', True)", event_library_dialog_py)
         self.assertIn('self.tree.setColumnHidden(5, not self.mod_context_enabled)', event_library_dialog_py)
         self.assertIn('if self.mod_context_enabled and self.mod_examples_check.isChecked():', event_library_dialog_py)
