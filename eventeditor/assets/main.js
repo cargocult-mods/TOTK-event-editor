@@ -38,6 +38,8 @@ const MESSAGE_BUBBLE_BREAK_LINE = '\u2063';
 const MESSAGE_TAG_REGEX = /(\{\{[^{}\n]+\}\})/g;
 const MESSAGE_TAG_TOKEN_REGEX = /^\{\{[^{}\n]+\}\}$/;
 const WRAP_TOKEN_REGEX = /\{\{[^{}\n]+\}\}|[ \t]+|[^\s{}]+/g;
+const MIN_LONG_TOKEN_TRAILING_CHARS = 8;
+const LONG_TOKEN_BREAK_CHARS = '_/\\.-:';
 const MESSAGE_TAG_STYLE_KEYS = ['fill', 'font-weight', 'font-style', 'font-size', 'font-family'];
 const MESSAGE_TAG_DEFAULT_COLOR = '#fffeed';
 const TOTK_MESSAGE_TAG_COLORS = {
@@ -166,6 +168,55 @@ function messageTokenVisibleText(token) {
   return renderMessageTagsAsStyling ? formatMessageTagPreview(tag) : token;
 }
 
+function isLongTokenBreakChar(ch) {
+  return LONG_TOKEN_BREAK_CHARS.indexOf(ch) >= 0;
+}
+
+function preferredLongTokenBreakIndex(token, maxLength) {
+  const safeMaxLength = Math.max(1, maxLength);
+  if (token.length <= safeMaxLength) {
+    return token.length;
+  }
+
+  const minTrailing = Math.min(
+    MIN_LONG_TOKEN_TRAILING_CHARS,
+    Math.max(2, Math.floor(safeMaxLength / 3))
+  );
+  const hardTrailing = token.length - safeMaxLength;
+  const minBreakIndex = Math.max(1, Math.floor(safeMaxLength * 0.55));
+  for (let i = safeMaxLength; i >= minBreakIndex; i -= 1) {
+    if (!isLongTokenBreakChar(token.charAt(i - 1))) {
+      continue;
+    }
+    const trailing = token.length - i;
+    if (trailing === 0 || trailing >= minTrailing) {
+      return i;
+    }
+  }
+
+  if (hardTrailing > 0 && hardTrailing < minTrailing) {
+    return token.length;
+  }
+  return safeMaxLength;
+}
+
+function splitLongLabelToken(token, maxLength) {
+  const safeMaxLength = Math.max(1, maxLength);
+  const segments = [];
+  let remaining = `${token}`;
+  while (remaining.length > safeMaxLength) {
+    const breakIndex = preferredLongTokenBreakIndex(remaining, safeMaxLength);
+    if (breakIndex >= remaining.length) {
+      break;
+    }
+    segments.push(remaining.slice(0, breakIndex));
+    remaining = remaining.slice(breakIndex);
+  }
+  if (remaining) {
+    segments.push(remaining);
+  }
+  return segments;
+}
 function wrapLabelText(text, maxLength=LABEL_WRAP_LENGTH) {
   const normalized = `${text}`.replace(/\r\n/g, '\n');
   const wrappedLines = [];
@@ -221,9 +272,7 @@ function wrapLabelText(text, maxLength=LABEL_WRAP_LENGTH) {
       }
 
       if (!isMessageTagToken(token) && visibleLength > maxLength && !current) {
-        for (let i = 0; i < token.length; i += maxLength) {
-          wrappedLines.push(token.slice(i, i + maxLength));
-        }
+        wrappedLines.push(...splitLongLabelToken(token, maxLength));
         continue;
       }
 
@@ -615,6 +664,13 @@ function getNodeMessageId(node) {
 
 function shouldShowNodeParams(node) {
   return eventParamVisible && !(isMalsMessageActionNode(node) && !eventTalkParamVisible);
+}
+
+function getEdgeDisplayValue(entry) {
+  if (!entry || !entry.data || entry.data.display_value == null) {
+    return entry && entry.data ? entry.data.value : null;
+  }
+  return entry.data.display_value;
 }
 
 function getNodeLabel(node) {
@@ -1477,9 +1533,10 @@ class Graph {
           name: entry.data.name,
         });
       } else if (entry.type === 'edge') {
+        const edgeDisplayValue = getEdgeDisplayValue(entry);
         this.g.setEdge(entry.source, entry.target, {
           labelType: 'html',
-          label: `<span id="label-edge-${entry.source}-${entry.target}-${entry.data.value}">${entry.data.value == null ? '' : entry.data.value}</span>`,
+          label: `<span id="label-edge-${entry.source}-${entry.target}-${entry.data.value}">${edgeDisplayValue == null ? '' : edgeDisplayValue}</span>`,
           'class': `edge-${entry.source}-${entry.target}`,
           virtual: !!entry.data.virtual,
         }, `edge-${entry.source}-${entry.target}-${entry.data.value}`);

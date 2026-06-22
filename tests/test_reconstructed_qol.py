@@ -1,3 +1,4 @@
+import json
 import tempfile
 import types
 import unittest
@@ -452,6 +453,101 @@ class ReconstructedQoLTests(unittest.TestCase):
         graph_data = [{'type': 'node', 'data': {'params': {'MessageID': message_id}}}]
         FlowchartView._injectMessageTexts(view, graph_data)
         self.assertEqual(graph_data[0]['data']['_message_text'], 'Balloon text')
+
+    def test_graph_label_wrapper_avoids_single_character_identifier_lines(self):
+        from PyQt5.QtQml import QJSEngine # type: ignore
+
+        _app = qc.QCoreApplication.instance() or qc.QCoreApplication([])
+        main_js = Path(util.get_path('assets/main.js')).read_text(encoding='utf-8')
+        start = main_js.index('const LABEL_WRAP_LENGTH')
+        end = main_js.index('function messageLineVisibleText')
+        label_wrap_js = main_js[start:end]
+        engine = QJSEngine()
+
+        def wrap_label(value: str):
+            result = engine.evaluate(
+                '{}\nJSON.stringify(wrapLabelText({}));'.format(label_wrap_js, json.dumps(value))
+            )
+            if result.isError():
+                self.fail(result.toString())
+            return json.loads(result.toString())
+
+        identifier = 'TBW_Blacksmith_Talked_CC_Blacksmith_Gerudo_01'
+        wrapped_identifier = wrap_label(identifier)
+        self.assertEqual(''.join(wrapped_identifier), identifier)
+        self.assertEqual(wrapped_identifier, ['TBW_Blacksmith_Talked_CC_Blacksmith_', 'Gerudo_01'])
+
+        almost_fits_without_breaks = 'A' * 45
+        self.assertEqual(wrap_label(almost_fits_without_breaks), [almost_fits_without_breaks])
+
+        long_without_breaks = 'A' * 89
+        wrapped_long = wrap_label(long_without_breaks)
+        self.assertEqual(''.join(wrapped_long), long_without_breaks)
+        self.assertGreater(len(wrapped_long[-1]), 1)
+
+    def test_bool_query_edge_labels_use_audited_polarity(self):
+        from eventeditor.flowchart_view import FlowchartView
+
+        def make_view(actor_name, query_name):
+            flow = EventFlow()
+            flow.flowchart = Flowchart()
+
+            actor = Actor()
+            actor.identifier.name = actor_name
+            actor.queries = [StringHolder(query_name)]
+
+            event = Event()
+            event.name = 'Event0'
+            event.data = SwitchEvent()
+            event.data.actor.v = actor
+            event.data.actor_query.v = actor.queries[0]
+
+            flow.flowchart.actors = [actor]
+            flow.flowchart.events = [event]
+            view = FlowchartView.__new__(FlowchartView)
+            view.flow_data = types.SimpleNamespace(flow=flow)
+            return view
+
+        true_zero_graph = [
+            {'type': 'edge', 'source': 0, 'target': 1, 'data': {'value': 0}},
+            {'type': 'edge', 'source': 0, 'target': 2, 'data': {'value': 1}},
+        ]
+        FlowchartView._injectBoolQueryEdgeLabels(
+            make_view('GameDataActor', 'EventQueryIsGameDataBool'),
+            true_zero_graph,
+        )
+        self.assertEqual(true_zero_graph[0]['data']['display_value'], '0 (true)')
+        self.assertEqual(true_zero_graph[1]['data']['display_value'], '1 (false)')
+
+        false_zero_graph = [
+            {'type': 'edge', 'source': 0, 'target': 1, 'data': {'value': 0}},
+            {'type': 'edge', 'source': 0, 'target': 2, 'data': {'value': 1}},
+        ]
+        FlowchartView._injectBoolQueryEdgeLabels(
+            make_view('Player', 'EventQueryCheckPlayerState'),
+            false_zero_graph,
+        )
+        self.assertEqual(false_zero_graph[0]['data']['display_value'], '0 (false)')
+        self.assertEqual(false_zero_graph[1]['data']['display_value'], '1 (true)')
+
+        unknown_graph = [{'type': 'edge', 'source': 0, 'target': 1, 'data': {'value': 0}}]
+        FlowchartView._injectBoolQueryEdgeLabels(
+            make_view('GameDataActor', 'EventQueryIsGameDataEnum'),
+            unknown_graph,
+        )
+        self.assertNotIn('display_value', unknown_graph[0]['data'])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            mod_root = Path(tmp) / 'Mod'
+            flow_path = mod_root / 'romfs' / 'Event' / 'EventFlow' / 'Demo.bfevfl'
+            pack_path = mod_root / 'romfs' / 'Pack' / 'Actor' / 'GameDataActor.pack.zs'
+            pack_path.parent.mkdir(parents=True)
+            pack_path.write_bytes(b'')
+            overridden_view = make_view('GameDataActor', 'EventQueryIsGameDataBool')
+            overridden_view.flow_data.flow_path = str(flow_path)
+            overridden_graph = [{'type': 'edge', 'source': 0, 'target': 1, 'data': {'value': 0}}]
+            FlowchartView._injectBoolQueryEdgeLabels(overridden_view, overridden_graph)
+            self.assertNotIn('display_value', overridden_graph[0]['data'])
 
     def test_available_mals_locales_include_known_totk_locales(self):
         locales = available_mals_locale_names('', '')
@@ -1047,6 +1143,11 @@ class ReconstructedQoLTests(unittest.TestCase):
         main_css = Path(util.get_path('assets/main.css')).read_text(encoding='utf-8')
         main_py = (source_root / '__main__.py').read_text(encoding='utf-8')
         flowchart_py = (source_root / 'flowchart_view.py').read_text(encoding='utf-8')
+        self.assertIn('import eventeditor.boolean_query_polarity as boolean_query_polarity', flowchart_py)
+        self.assertIn('def _injectBoolQueryEdgeLabels', flowchart_py)
+        self.assertIn("edge_data['display_value'] = display_value", flowchart_py)
+        self.assertIn('function getEdgeDisplayValue(entry)', main_js)
+        self.assertIn('const edgeDisplayValue = getEdgeDisplayValue(entry);', main_js)
         fake_update_launcher_py = (tool_root / 'launch_fake_update_test.py').read_text(encoding='utf-8')
 
         self.assertIn('GITHUB_RELEASES_URL', main_py)

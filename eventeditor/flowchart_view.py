@@ -8,6 +8,7 @@ import typing
 
 import eventeditor.actor_json as aj
 from eventeditor.container_model import ContainerModel
+import eventeditor.boolean_query_polarity as boolean_query_polarity
 from eventeditor.container_view import ContainerView
 import eventeditor.entry_point_tree_xml as eptxml
 from eventeditor.event_branch_editors import SwitchEventEditDialog, ForkEventEditDialog
@@ -18,6 +19,7 @@ import eventeditor.event_library as event_library
 from eventeditor.flow_data import FlowData, FlowDataChangeReason
 from eventeditor.entry_point_model import EntryPointModel
 import eventeditor.flowchart_tools as ft
+import eventeditor.totk_zs as totk_zs
 import eventeditor.mals as mals
 from eventeditor.search_bar import SearchBar
 from eventeditor.util import *
@@ -540,6 +542,7 @@ class FlowchartView(q.QWidget):
             return []
         data = generate_flowchart_graph(flow)
         self._injectMessageTexts(data)
+        self._injectBoolQueryEdgeLabels(data)
         return self._filterHiddenEntryPointGraphData(data)
 
     def getMessageArchivePath(self) -> str:
@@ -730,6 +733,102 @@ class FlowchartView(q.QWidget):
             return None
         prefix = base_message_id.rsplit(':', 1)[0] if ':' in base_message_id else base_message_id
         return f'{prefix}:{choice_value:04d}'
+
+
+    def _actorAndQueryNameForSwitchEvent(self,
+                                         event_data: SwitchEvent,
+                                         flowchart: Flowchart) -> typing.Tuple[str, str]:
+        actor_ref = getattr(event_data, 'actor', None)
+        actor = getattr(actor_ref, 'v', actor_ref)
+        if isinstance(actor, int):
+            try:
+                actor = flowchart.actors[actor]
+            except (AttributeError, IndexError, TypeError):
+                return '', ''
+
+        identifier = getattr(actor, 'identifier', None)
+        actor_name = getattr(identifier, 'name', '') if identifier is not None else ''
+        if not actor_name:
+            return '', ''
+
+        query_ref = getattr(event_data, 'actor_query', None)
+        query = getattr(query_ref, 'v', query_ref)
+        if isinstance(query, int):
+            try:
+                query = actor.queries[query]
+            except (AttributeError, IndexError, TypeError):
+                return actor_name, ''
+        query_name = getattr(query, 'v', query)
+        return actor_name, str(query_name) if query_name is not None else ''
+
+    def _switchEventForGraphEdge(self,
+                                 flowchart: Flowchart,
+                                 edge: typing.Mapping[str, typing.Any]) -> typing.Optional[Event]:
+        source = edge.get('source')
+        try:
+            source_index = int(source)
+        except (TypeError, ValueError):
+            return None
+
+        events = getattr(flowchart, 'events', []) or []
+        try:
+            event = events[source_index]
+        except (IndexError, TypeError):
+            return None
+        if isinstance(getattr(event, 'data', None), SwitchEvent):
+            return event
+        return None
+
+
+    def _hasCurrentModActorPackOverride(self,
+                                        actor_name: str,
+                                        cache: typing.Dict[str, bool]) -> bool:
+        if not actor_name:
+            return False
+        if actor_name in cache:
+            return cache[actor_name]
+
+        flow_path = getattr(self.flow_data, 'flow_path', '')
+        vanilla_romfs = totk_zs.get_romfs_path()
+        if not event_library.mod_context_enabled_for_flow_path(flow_path, vanilla_romfs):
+            cache[actor_name] = False
+            return False
+
+        actor_pack_names = (
+            '{}.pack.zs'.format(actor_name),
+            '{}.pack'.format(actor_name),
+        )
+        for root in event_library.current_mod_roots(flow_path):
+            for actor_root in (root / 'romfs' / 'Pack' / 'Actor', root / 'Pack' / 'Actor'):
+                if any((actor_root / name).is_file() for name in actor_pack_names):
+                    cache[actor_name] = True
+                    return True
+
+        cache[actor_name] = False
+        return False
+
+    def _injectBoolQueryEdgeLabels(self, data: list) -> None:
+        flow = self.flow_data.flow
+        flowchart = getattr(flow, 'flowchart', None) if flow is not None else None
+        if flowchart is None:
+            return
+
+        actor_pack_overrides = {}  # type: typing.Dict[str, bool]
+        for entry in data:
+            if entry.get('type') != 'edge':
+                continue
+            edge_data = entry.get('data')
+            if not isinstance(edge_data, dict):
+                continue
+            event = self._switchEventForGraphEdge(flowchart, entry)
+            if event is None:
+                continue
+            actor_name, query_name = self._actorAndQueryNameForSwitchEvent(event.data, flowchart)
+            if self._hasCurrentModActorPackOverride(actor_name, actor_pack_overrides):
+                continue
+            display_value = boolean_query_polarity.audited_case_label(actor_name, query_name, edge_data.get('value'))
+            if display_value is not None:
+                edge_data['display_value'] = display_value
 
     def _injectMessageTexts(self, data: list) -> None:
         if not self._message_lookup:
