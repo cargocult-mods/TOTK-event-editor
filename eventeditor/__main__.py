@@ -312,6 +312,11 @@ MALS_ARCHIVE_SUFFIXES = ('.sarc.zs', '.sarc', '.msbt')
 MALS_ARCHIVE_SUFFIXES_LONGEST_FIRST = tuple(sorted(MALS_ARCHIVE_SUFFIXES, key=len, reverse=True))
 MALS_PRODUCT_SUFFIX_RE = re.compile(r'\.Product(?:\.[^.]+)*$', re.IGNORECASE)
 MALS_LOCALE_NAME_RE = re.compile(r'^[A-Z]{2}[a-z]{2}$')
+PLACEHOLDER_ACTOR_NAME = '<placeholder actor>'
+PLACEHOLDER_ACTION_NAME = '<placeholder action>'
+PLACEHOLDER_QUERY_NAME = '<placeholder query>'
+PLACEHOLDER_SUBFLOW_ENTRY_POINT = 'placeholder sub flow'
+PLACEHOLDER_EVENT_NAME = '<placeholder>'
 _STYLESHEET_ICON_CACHE: typing.Dict[typing.Tuple[str, str, str], str] = {}
 
 def split_flow_path_suffix(path: str) -> typing.Tuple[str, str]:
@@ -448,6 +453,94 @@ def find_missing_internal_subflow_calls(flow: typing.Optional[EventFlow]) -> typ
             event_name = getattr(event, 'name', '<unnamed event>')
             missing.append(f'{event_name} calls {target_display}')
     return missing
+
+def _unwrap_evfl_value(value: typing.Any) -> typing.Any:
+    for _ in range(8):
+        next_value = getattr(value, 'v', None)
+        if next_value is None or next_value is value:
+            return value
+        value = next_value
+    return value
+
+def _evfl_name(value: typing.Any) -> str:
+    unwrapped = _unwrap_evfl_value(value)
+    if isinstance(unwrapped, str):
+        return unwrapped
+    return getattr(unwrapped, 'name', '') or ''
+
+def _actor_name(actor_ref: typing.Any) -> str:
+    actor = _unwrap_evfl_value(actor_ref)
+    identifier = getattr(actor, 'identifier', None)
+    return getattr(identifier, 'name', '') or ''
+
+def _flowchart_event_location(flowchart: typing.Any, event: typing.Any) -> str:
+    flow_name = getattr(flowchart, 'name', '') or '<unnamed flowchart>'
+    event_name = getattr(event, 'name', '') or '<unnamed event>'
+    return f'{flow_name} / {event_name}'
+
+def _append_placeholder_warning(warnings: typing.List[str], seen: typing.Set[str], location: str, finding: str) -> None:
+    warning = f'{location}: {finding}'
+    if warning in seen:
+        return
+    seen.add(warning)
+    warnings.append(warning)
+
+def _append_placeholder_reference_warnings(
+    warnings: typing.List[str],
+    seen: typing.Set[str],
+    location: str,
+    references: typing.Iterable[typing.Any],
+) -> None:
+    for reference in references:
+        if _evfl_name(reference) == PLACEHOLDER_EVENT_NAME:
+            _append_placeholder_warning(warnings, seen, location, 'placeholder branch target')
+
+def collect_placeholder_save_warnings(flow: typing.Optional[EventFlow]) -> typing.List[str]:
+    if not flow:
+        return []
+
+    warnings: typing.List[str] = []
+    seen: typing.Set[str] = set()
+
+    for flowchart in iter_event_flow_flowcharts(flow):
+        flow_name = getattr(flowchart, 'name', '') or '<unnamed flowchart>'
+        for actor in getattr(flowchart, 'actors', []) or []:
+            actor_location = f'{flow_name} actor list'
+            if _actor_name(actor) == PLACEHOLDER_ACTOR_NAME:
+                _append_placeholder_warning(warnings, seen, actor_location, 'placeholder actor')
+            if any(_evfl_name(action) == PLACEHOLDER_ACTION_NAME for action in getattr(actor, 'actions', []) or []):
+                _append_placeholder_warning(warnings, seen, actor_location, 'placeholder action')
+            if any(_evfl_name(query) == PLACEHOLDER_QUERY_NAME for query in getattr(actor, 'queries', []) or []):
+                _append_placeholder_warning(warnings, seen, actor_location, 'placeholder query')
+
+        for event in getattr(flowchart, 'events', []) or []:
+            location = _flowchart_event_location(flowchart, event)
+            if getattr(event, 'name', '') == PLACEHOLDER_EVENT_NAME:
+                _append_placeholder_warning(warnings, seen, location, 'placeholder event/node')
+            data = getattr(event, 'data', None)
+            if isinstance(data, ActionEvent):
+                if _actor_name(getattr(data, 'actor', None)) == PLACEHOLDER_ACTOR_NAME:
+                    _append_placeholder_warning(warnings, seen, location, 'placeholder actor')
+                if _evfl_name(getattr(data, 'actor_action', None)) == PLACEHOLDER_ACTION_NAME:
+                    _append_placeholder_warning(warnings, seen, location, 'placeholder action')
+                _append_placeholder_reference_warnings(warnings, seen, location, [getattr(data, 'nxt', None)])
+            elif isinstance(data, SwitchEvent):
+                if _actor_name(getattr(data, 'actor', None)) == PLACEHOLDER_ACTOR_NAME:
+                    _append_placeholder_warning(warnings, seen, location, 'placeholder actor')
+                if _evfl_name(getattr(data, 'actor_query', None)) == PLACEHOLDER_QUERY_NAME:
+                    _append_placeholder_warning(warnings, seen, location, 'placeholder query')
+                _append_placeholder_reference_warnings(warnings, seen, location, (getattr(data, 'cases', {}) or {}).values())
+            elif isinstance(data, SubFlowEvent):
+                if getattr(data, 'entry_point_name', '') == PLACEHOLDER_SUBFLOW_ENTRY_POINT:
+                    _append_placeholder_warning(warnings, seen, location, 'placeholder sub flow')
+                _append_placeholder_reference_warnings(warnings, seen, location, [getattr(data, 'nxt', None)])
+            elif isinstance(data, ForkEvent):
+                fork_refs = list(getattr(data, 'forks', []) or []) + [getattr(data, 'join', None)]
+                _append_placeholder_reference_warnings(warnings, seen, location, fork_refs)
+            elif isinstance(data, JoinEvent):
+                _append_placeholder_reference_warnings(warnings, seen, location, [getattr(data, 'nxt', None)])
+
+    return warnings
 
 def iter_event_next_events(event: typing.Any) -> typing.Iterable[typing.Any]:
     data = getattr(event, 'data', None)
@@ -2387,6 +2480,26 @@ QToolButton:hover, QToolButton:pressed {
         )
         return ret == q.QMessageBox.Ok
 
+    def confirmPlaceholderContentForSave(self) -> bool:
+        placeholder_warnings = collect_placeholder_save_warnings(self.flow)
+        if not placeholder_warnings:
+            return True
+
+        listed_warnings = '\n'.join(f'- {warning}' for warning in placeholder_warnings[:30])
+        if len(placeholder_warnings) > 30:
+            listed_warnings += f'\n- ...and {len(placeholder_warnings) - 30} more'
+        ret = q.QMessageBox.warning(
+            self,
+            'Save warning',
+            'This file still contains placeholder actors or events/nodes.\n\n'
+            'Saving it may cause the game to crash.\n\n'
+            'Continue saving anyway?\n\n'
+            f'{listed_warnings}',
+            q.QMessageBox.Ok | q.QMessageBox.Cancel,
+            q.QMessageBox.Cancel,
+        )
+        return ret == q.QMessageBox.Ok
+
     def warnExcessiveRequiredSubflowsForSave(self, path: str) -> bool:
         flow_names = self.collectRequiredSubflowFlowNames(path)
         if len(flow_names) > 32:
@@ -2400,6 +2513,7 @@ QToolButton:hover, QToolButton:pressed {
     def confirmSaveChecks(self, path: str) -> bool:
         return (
             self.confirmFilenameFlowNameMatchForSave(path) and
+            self.confirmPlaceholderContentForSave() and
             self.confirmInternalSubflowTargetsForSave() and
             self.warnExcessiveRequiredSubflowsForSave(path)
         )

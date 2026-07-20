@@ -38,6 +38,7 @@ from eventeditor.__main__ import (
     available_mals_locale_names,
     build_about_html,
     choose_mals_archive_from_directory,
+    collect_placeholder_save_warnings,
     collect_required_external_subflow_flow_names,
     current_mals_display_name,
     discover_mals_locale_names,
@@ -330,6 +331,41 @@ class ReconstructedQoLTests(unittest.TestCase):
             'This actor will likely crash the game when it spawns.\n\n'
             'The highest proven number of subflows is 32.',
         )
+
+    def test_placeholder_save_warning_detection(self):
+        clean_flow = make_action_flow('CleanFlow', 'Npc_EventStarter', 'EventTalk', {})
+        self.assertEqual(collect_placeholder_save_warnings(clean_flow), [])
+
+        placeholder_actor_flow = make_action_flow(
+            'PlaceholderActorFlow',
+            '<placeholder actor>',
+            '<placeholder action>',
+            {},
+        )
+        actor_warnings = collect_placeholder_save_warnings(placeholder_actor_flow)
+        self.assertTrue(any('placeholder actor' in warning for warning in actor_warnings))
+        self.assertTrue(any('placeholder action' in warning for warning in actor_warnings))
+
+        subflow_flow = EventFlow()
+        subflow_flow.name = 'PlaceholderSubFlow'
+        subflow_flow.flowchart = Flowchart()
+        subflow_flow.flowchart.name = 'PlaceholderSubFlow'
+        subflow_event = Event()
+        subflow_event.name = 'Event0'
+        subflow_event.data = SubFlowEvent()
+        subflow_event.data.entry_point_name = 'placeholder sub flow'
+        subflow_flow.flowchart.events = [subflow_event]
+        subflow_warnings = collect_placeholder_save_warnings(subflow_flow)
+        self.assertTrue(any('placeholder sub flow' in warning for warning in subflow_warnings))
+
+        switch_flow = make_query_flow('PlaceholderBranchFlow', 'GameDataActor', 'EventQueryIsGameDataBool', {})
+        placeholder_event = Event()
+        placeholder_event.name = '<placeholder>'
+        placeholder_ref = RequiredIndex()
+        placeholder_ref.v = placeholder_event
+        switch_flow.flowchart.events[0].data.cases[1] = placeholder_ref
+        branch_warnings = collect_placeholder_save_warnings(switch_flow)
+        self.assertTrue(any('placeholder branch target' in warning for warning in branch_warnings))
 
     def test_mals_inference_helpers_for_romfs_layout(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1153,6 +1189,10 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn('GITHUB_RELEASES_URL', main_py)
         self.assertIn('GITHUB_LATEST_RELEASE_API_URL', main_py)
         self.assertIn('def extract_update_summary', main_py)
+        self.assertIn('def confirmPlaceholderContentForSave(self) -> bool:', main_py)
+        self.assertIn('self.confirmPlaceholderContentForSave() and', main_py)
+        self.assertIn('Saving it may cause the game to crash.', main_py)
+        self.assertIn('q.QMessageBox.Ok | q.QMessageBox.Cancel', main_py)
         self.assertIn('def build_latest_release_request', main_py)
         self.assertIn('def build_update_info', main_py)
         self.assertIn('class UpdateCheckSignals', main_py)
