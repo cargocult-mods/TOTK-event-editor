@@ -8,7 +8,7 @@ import typing
 
 import eventeditor.actor_json as aj
 from eventeditor.container_model import ContainerModel
-import eventeditor.boolean_query_polarity as boolean_query_polarity
+import eventeditor.query_case_labels as query_case_labels
 from eventeditor.container_view import ContainerView
 import eventeditor.entry_point_tree_xml as eptxml
 from eventeditor.event_branch_editors import SwitchEventEditDialog, ForkEventEditDialog
@@ -542,7 +542,7 @@ class FlowchartView(q.QWidget):
             return []
         data = generate_flowchart_graph(flow)
         self._injectMessageTexts(data)
-        self._injectBoolQueryEdgeLabels(data)
+        self._injectQueryEdgeLabels(data)
         return self._filterHiddenEntryPointGraphData(data)
 
     def getMessageArchivePath(self) -> str:
@@ -807,7 +807,7 @@ class FlowchartView(q.QWidget):
         cache[actor_name] = False
         return False
 
-    def _injectBoolQueryEdgeLabels(self, data: list) -> None:
+    def _injectQueryEdgeLabels(self, data: list) -> None:
         flow = self.flow_data.flow
         flowchart = getattr(flow, 'flowchart', None) if flow is not None else None
         if flowchart is None:
@@ -826,7 +826,7 @@ class FlowchartView(q.QWidget):
             actor_name, query_name = self._actorAndQueryNameForSwitchEvent(event.data, flowchart)
             if self._hasCurrentModActorPackOverride(actor_name, actor_pack_overrides):
                 continue
-            display_value = boolean_query_polarity.audited_case_label(actor_name, query_name, edge_data.get('value'))
+            display_value = query_case_labels.audited_case_label(actor_name, query_name, edge_data.get('value'))
             if display_value is not None:
                 edge_data['display_value'] = display_value
 

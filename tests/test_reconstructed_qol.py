@@ -521,8 +521,9 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertEqual(''.join(wrapped_long), long_without_breaks)
         self.assertGreater(len(wrapped_long[-1]), 1)
 
-    def test_bool_query_edge_labels_use_audited_polarity(self):
+    def test_query_edge_labels_use_audited_node_semantics(self):
         from eventeditor.flowchart_view import FlowchartView
+        from eventeditor import query_case_labels
 
         def make_view(actor_name, query_name):
             flow = EventFlow()
@@ -548,7 +549,7 @@ class ReconstructedQoLTests(unittest.TestCase):
             {'type': 'edge', 'source': 0, 'target': 1, 'data': {'value': 0}},
             {'type': 'edge', 'source': 0, 'target': 2, 'data': {'value': 1}},
         ]
-        FlowchartView._injectBoolQueryEdgeLabels(
+        FlowchartView._injectQueryEdgeLabels(
             make_view('GameDataActor', 'EventQueryIsGameDataBool'),
             true_zero_graph,
         )
@@ -559,16 +560,61 @@ class ReconstructedQoLTests(unittest.TestCase):
             {'type': 'edge', 'source': 0, 'target': 1, 'data': {'value': 0}},
             {'type': 'edge', 'source': 0, 'target': 2, 'data': {'value': 1}},
         ]
-        FlowchartView._injectBoolQueryEdgeLabels(
+        FlowchartView._injectQueryEdgeLabels(
             make_view('Player', 'EventQueryCheckPlayerState'),
             false_zero_graph,
         )
         self.assertEqual(false_zero_graph[0]['data']['display_value'], '0 (false)')
         self.assertEqual(false_zero_graph[1]['data']['display_value'], '1 (true)')
 
+        int_compare_graph = [
+            {'type': 'edge', 'source': 0, 'target': 1, 'data': {'value': 0}},
+            {'type': 'edge', 'source': 0, 'target': 2, 'data': {'value': 1}},
+            {'type': 'edge', 'source': 0, 'target': 3, 'data': {'value': 2}},
+        ]
+        FlowchartView._injectQueryEdgeLabels(
+            make_view('GameDataActor', 'EventQueryIsGameDataInt'),
+            int_compare_graph,
+        )
+        self.assertEqual(
+            [edge['data']['display_value'] for edge in int_compare_graph],
+            ['0 (is less than)', '1 (equal)', '2 (is more than)'],
+        )
+
+        self.assertEqual(
+            query_case_labels.audited_case_label(
+                'GameDataActor', 'EventQueryIsGameDataFloat', 2
+            ),
+            '2 (is more than)',
+        )
+        self.assertEqual(
+            query_case_labels.audited_case_label(
+                'GameDataActor', 'EventQueryIsGameDataEnum', 1
+            ),
+            '1 (not equal)',
+        )
+        self.assertEqual(
+            query_case_labels.audited_case_label(
+                'GameSystemActor', 'EventQueryTalkChoice4', 3
+            ),
+            '3 (choice 4)',
+        )
+        self.assertEqual(
+            query_case_labels.audited_case_label(
+                'EventWorldManagerController', 'EventQueryTimeDivision', 6
+            ),
+            '6 (night A, 21:00+)',
+        )
+        self.assertEqual(
+            query_case_labels.audited_case_label(
+                'PouchSystemActor', 'EventQueryCheckSellResult', 2
+            ),
+            '2 (cannot sell: equipped)',
+        )
+
         unknown_graph = [{'type': 'edge', 'source': 0, 'target': 1, 'data': {'value': 0}}]
-        FlowchartView._injectBoolQueryEdgeLabels(
-            make_view('GameDataActor', 'EventQueryIsGameDataEnum'),
+        FlowchartView._injectQueryEdgeLabels(
+            make_view('GameDataActor', 'EventQueryUnknown'),
             unknown_graph,
         )
         self.assertNotIn('display_value', unknown_graph[0]['data'])
@@ -582,7 +628,7 @@ class ReconstructedQoLTests(unittest.TestCase):
             overridden_view = make_view('GameDataActor', 'EventQueryIsGameDataBool')
             overridden_view.flow_data.flow_path = str(flow_path)
             overridden_graph = [{'type': 'edge', 'source': 0, 'target': 1, 'data': {'value': 0}}]
-            FlowchartView._injectBoolQueryEdgeLabels(overridden_view, overridden_graph)
+            FlowchartView._injectQueryEdgeLabels(overridden_view, overridden_graph)
             self.assertNotIn('display_value', overridden_graph[0]['data'])
 
     def test_available_mals_locales_include_known_totk_locales(self):
@@ -1179,8 +1225,8 @@ class ReconstructedQoLTests(unittest.TestCase):
         main_css = Path(util.get_path('assets/main.css')).read_text(encoding='utf-8')
         main_py = (source_root / '__main__.py').read_text(encoding='utf-8')
         flowchart_py = (source_root / 'flowchart_view.py').read_text(encoding='utf-8')
-        self.assertIn('import eventeditor.boolean_query_polarity as boolean_query_polarity', flowchart_py)
-        self.assertIn('def _injectBoolQueryEdgeLabels', flowchart_py)
+        self.assertIn('import eventeditor.query_case_labels as query_case_labels', flowchart_py)
+        self.assertIn('def _injectQueryEdgeLabels', flowchart_py)
         self.assertIn("edge_data['display_value'] = display_value", flowchart_py)
         self.assertIn('function getEdgeDisplayValue(entry)', main_js)
         self.assertIn('const edgeDisplayValue = getEdgeDisplayValue(entry);', main_js)

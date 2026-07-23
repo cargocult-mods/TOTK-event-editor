@@ -42,6 +42,8 @@ editing, building, and designing eventflows.
 - View flowcharts as editable node graphs.
 - Inspect actors, actions, queries, forks, joins, switches, and entry points.
 - Edit node type, actor, parameters, links, cases, and other event data.
+- Read known switch branches by meaning, including comparison, choice, weather,
+  time, inventory, dye-color, and other node-specific outcomes.
 - See Mals/MSBT message text while working with dialogue events.
 - Browse actor-specific action/query possibilities with the Event Library.
 

@@ -1,0 +1,84 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>EventEditor query-label render verification</title>
+  <link rel="stylesheet" href="../../eventeditor/assets/main.css">
+  <link rel="stylesheet" href="../../eventeditor/assets/lib/node_modules/d3-context-menu/css/d3-context-menu.css">
+</head>
+<body>
+  <svg id="graph"><g/></svg>
+  <pre id="fixture-error" style="position:fixed;left:8px;top:8px;color:#ffb3b3;z-index:9999">Fixture loading…</pre>
+  <script>
+    window.addEventListener('error', (event) => {
+      document.getElementById('fixture-error').textContent =
+        `${event.message}\n${event.filename}:${event.lineno}`;
+    });
+    const signal = { connect() {} };
+    const graphData = [
+      {type: 'node', id: 0, node_type: 'switch', data: {
+        name: 'ProgressCompleteGate',
+        actor: 'GameDataActor',
+        query: 'EventQueryIsGameDataInt',
+        params: {GameDataName: 'Progress', Value: 100}
+      }},
+      {type: 'node', id: 1, node_type: 'action', data: {
+        name: 'Below', actor: 'EventSystemActor', action: 'Continue'
+      }},
+      {type: 'node', id: 2, node_type: 'action', data: {
+        name: 'Equal', actor: 'EventSystemActor', action: 'Return'
+      }},
+      {type: 'node', id: 3, node_type: 'action', data: {
+        name: 'Above', actor: 'EventSystemActor', action: 'Return'
+      }},
+      {type: 'edge', source: 0, target: 1, data: {value: 0, display_value: '0 (is less than)'}},
+      {type: 'edge', source: 0, target: 2, data: {value: 1, display_value: '1 (equal)'}},
+      {type: 'edge', source: 0, target: 3, data: {value: 2, display_value: '2 (is more than)'}}
+    ];
+    const fixtureWidget = {
+      getJson(callback) { callback(graphData); },
+      emitReadySignal() {},
+      emitReloadedSignal() {},
+      flowDataChanged: signal,
+      fileLoaded: signal,
+      selectRequested: signal,
+      revealRequested: signal,
+      instantRevealRequested: signal,
+      preserveViewportRequested: signal,
+      fastGraphReloadRequested: signal,
+      eventNameVisibilityChanged: signal,
+      eventParamVisibilityChanged: signal,
+      eventTalkParamVisibilityChanged: signal,
+      eventMessageVisibilityChanged: signal,
+      actionProhibitionChanged: signal,
+      entryPointFilterStateChanged: signal
+    };
+    window.qt = {webChannelTransport: {}};
+    window.QWebChannel = function(_transport, callback) {
+      callback({objects: {widget: fixtureWidget}});
+    };
+  </script>
+  <script src="../../eventeditor/assets/lib/d3.v3.min.js"></script>
+  <script src="../../eventeditor/assets/lib/graphlib.min.js"></script>
+  <script src="../../eventeditor/assets/lib/dagre-d3.js"></script>
+  <script src="../../eventeditor/assets/lib/node_modules/d3-context-menu/js/d3-context-menu.js"></script>
+  <script src="../../eventeditor/assets/main.js"></script>
+  <script>
+    if (graph && graph.g) {
+      graph.render(0);
+      graph.renderer.fitToContent();
+    }
+    const immediateLabels = Array.from(document.querySelectorAll('[id^="label-edge-"]'));
+    document.getElementById('fixture-error').textContent =
+      immediateLabels.length ? '' : 'EventEditor graph code loaded.';
+    setTimeout(() => {
+      const labels = Array.from(document.querySelectorAll('[id^="label-edge-"]'));
+      if (labels.length) {
+        document.getElementById('fixture-error').textContent = '';
+      } else {
+        document.getElementById('fixture-error').textContent = 'No edge labels rendered.';
+      }
+    }, 1200);
+  </script>
+</body>
+</html>
