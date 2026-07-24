@@ -44,6 +44,8 @@ editing, building, and designing eventflows.
 - Edit node type, actor, parameters, links, cases, and other event data.
 - Read known switch branches by meaning, including comparison, choice, weather,
   time, inventory, dye-color, and other node-specific outcomes.
+- Give newly created actors a conservative vanilla parameter baseline and
+  detect or repair missing actor safety parameters before saving.
 - See Mals/MSBT message text while working with dialogue events.
 - Browse actor-specific action/query possibilities with the Event Library.
 

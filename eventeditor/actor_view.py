@@ -3,6 +3,7 @@ import typing
 
 import eventeditor.actor_xml as axml
 from eventeditor.actor_model import ActorModelColumn
+from eventeditor.actor_safety_params import ensure_actor_safety_params
 from eventeditor.actor_string_list_model import ActorStringListModel
 from eventeditor.actor_string_list_view import ActorActionListView, ActorQueryListView
 import eventeditor.container_xml as cxml
@@ -156,13 +157,14 @@ class ActorDetailPane(q.QWidget):
 
         self.action_view.addActionBuilder(lambda menu, idx: menu.addAction('&Jump to events', lambda: self.onJumpToEvents(idx)))
         self.query_view.addActionBuilder(lambda menu, idx: menu.addAction('&Jump to events', lambda: self.onJumpToEvents(idx)))
-        self.container_view.addActionBuilder(lambda menu, idx: menu.addAction('&Add default create parameters', lambda: self.addDefaultCreateParameters()))
+        self.container_view.addActionBuilder(lambda menu, idx: menu.addAction('&Add safe baseline parameters', lambda: self.addDefaultCreateParameters()))
 
     def addDefaultCreateParameters(self) -> None:
-        if not self.actor or not self.actor.params:
+        if not self.actor:
             return
-        self.actor.params.data.update({'CreateMode': 0, 'IsGrounding': False, 'IsWorld': False, 'PosX': 0.0, 'PosY': 0.0, 'PosZ': 0.0, 'RotX': 0.0, 'RotY': 0.0, 'RotZ': 0.0})
-        self.container_model.set(self.actor.params)
+        if ensure_actor_safety_params(self.actor, Container):
+            self.container_model.set(self.actor.params)
+            self.flow_data.flowDataChanged.emit(FlowDataChangeReason.Actors)
 
     def _ensureActorParams(self) -> typing.Optional[Container]:
         if not self.actor:

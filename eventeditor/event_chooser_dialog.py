@@ -4,6 +4,7 @@ import typing
 
 from eventeditor.event_view import EventView
 from eventeditor.flow_data import FlowData
+from eventeditor.actor_safety_params import ensure_actor_safety_params
 import eventeditor.util as util
 from evfl import Actor, Container, Event, ActionEvent, SwitchEvent, ForkEvent, JoinEvent, SubFlowEvent
 from evfl.common import StringHolder
@@ -68,6 +69,7 @@ def _ensure_placeholder_actor(flow_data: FlowData) -> Actor:
     )
     if actor is None:
         actor = Actor()
+        ensure_actor_safety_params(actor, Container)
         actor.identifier.name = placeholder_name
         actor.identifier.sub_name = placeholder_sub_name
         actor.actions.append(StringHolder(placeholder_action))

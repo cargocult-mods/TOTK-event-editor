@@ -16,6 +16,11 @@ from evfl import EventFlow
 from evfl.event import ActionEvent, ForkEvent, JoinEvent, SubFlowEvent, SwitchEvent
 import eventeditor.ai as ai
 import eventeditor.actor_json as aj
+from eventeditor.actor_safety_params import (
+    actor_safety_findings_text,
+    collect_actor_safety_param_findings,
+    repair_actor_safety_params,
+)
 import eventeditor.mals as mals
 import eventeditor.totk_zs as totk_zs
 from eventeditor.actor_view import ActorView
@@ -2500,6 +2505,71 @@ QToolButton:hover, QToolButton:pressed {
         )
         return ret == q.QMessageBox.Ok
 
+    def _confirmActorSafetyParameterFindingsForSave(
+        self,
+        findings,
+        no_params: bool,
+    ) -> bool:
+        if not findings:
+            return True
+
+        message_box = q.QMessageBox(self)
+        message_box.setIcon(q.QMessageBox.Warning)
+        if no_params:
+            message_box.setWindowTitle('Actors have no parameters')
+            message_box.setText(
+                'Some actors have no parameter entries.\n\n'
+                'TOTK EventFlows with actors in this state are known to crash the game.'
+            )
+            message_box.setInformativeText(
+                'Add the conservative vanilla actor parameter baseline before saving?\n\n'
+                + actor_safety_findings_text(findings, include_missing_keys=False)
+            )
+        else:
+            message_box.setWindowTitle('Actors may be missing safety parameters')
+            message_box.setText(
+                'Some actors have parameters but are missing fields observed on vanilla actors.\n\n'
+                'It is not yet proven that every listed field is mandatory, so this warning '
+                'is less certain. Adding the missing defaults has no known penalty.'
+            )
+            message_box.setInformativeText(
+                'Add the missing baseline parameters before saving?\n\n'
+                + actor_safety_findings_text(findings, include_missing_keys=True)
+            )
+
+        fix_button = message_box.addButton('Add missing parameters', q.QMessageBox.AcceptRole)
+        save_button = message_box.addButton('Save anyway', q.QMessageBox.DestructiveRole)
+        cancel_button = message_box.addButton('Cancel', q.QMessageBox.RejectRole)
+        message_box.setDefaultButton(fix_button)
+        message_box.setEscapeButton(cancel_button)
+        message_box.exec_()
+
+        clicked_button = message_box.clickedButton()
+        if clicked_button == fix_button:
+            repaired = repair_actor_safety_params(findings, evfl.Container)
+            if repaired:
+                self.flow_data.flowDataChanged.emit(FlowDataChangeReason.Actors)
+            return True
+        if clicked_button == save_button:
+            return True
+        return False
+
+    def confirmActorSafetyParametersForSave(self) -> bool:
+        findings = collect_actor_safety_param_findings(self.flow)
+        if not self._confirmActorSafetyParameterFindingsForSave(
+            findings.no_params,
+            no_params=True,
+        ):
+            return False
+
+        # Re-scan because repairing the high-confidence empty-container case
+        # changes which actors, if any, still need the lower-confidence warning.
+        findings = collect_actor_safety_param_findings(self.flow)
+        return self._confirmActorSafetyParameterFindingsForSave(
+            findings.missing_some,
+            no_params=False,
+        )
+
     def warnExcessiveRequiredSubflowsForSave(self, path: str) -> bool:
         flow_names = self.collectRequiredSubflowFlowNames(path)
         if len(flow_names) > 32:
@@ -2514,6 +2584,7 @@ QToolButton:hover, QToolButton:pressed {
         return (
             self.confirmFilenameFlowNameMatchForSave(path) and
             self.confirmPlaceholderContentForSave() and
+            self.confirmActorSafetyParametersForSave() and
             self.confirmInternalSubflowTargetsForSave() and
             self.warnExcessiveRequiredSubflowsForSave(path)
         )

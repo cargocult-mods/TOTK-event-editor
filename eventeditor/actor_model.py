@@ -1,8 +1,9 @@
 from enum import IntEnum, auto
 import typing
 
-from evfl import EventFlow, Actor, ActorIdentifier
+from evfl import EventFlow, Actor, ActorIdentifier, Container
 from evfl.entry_point import EntryPoint
+from eventeditor.actor_safety_params import ensure_actor_safety_params
 import PyQt5.QtCore as qc # type: ignore
 import PyQt5.QtWidgets as q # type: ignore
 
@@ -37,7 +38,9 @@ class ActorModel(qc.QAbstractTableModel):
         if not self.flow or not self.flow.flowchart:
             return False
         self.beginInsertRows(qc.QModelIndex(), len(self.l), len(self.l))
-        self.l.append(Actor())
+        actor = Actor()
+        ensure_actor_safety_params(actor, Container)
+        self.l.append(actor)
         self.endInsertRows()
         return True
 

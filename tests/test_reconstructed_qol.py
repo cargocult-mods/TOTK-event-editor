@@ -18,6 +18,8 @@ from eventeditor.container_model import (
     ContainerModelColumn,
     format_container_display_value,
 )
+from eventeditor.actor_model import ActorModel
+from eventeditor.actor_safety_params import ACTOR_SAFETY_PARAM_DEFAULTS
 from eventeditor.event_edit_dialog import (
     _format_period_finding,
     _parameter_period_findings,
@@ -138,6 +140,18 @@ def write_sarc(path, files):
 
 
 class ReconstructedQoLTests(unittest.TestCase):
+    def test_new_actor_model_row_starts_with_safety_parameters(self):
+        flow = EventFlow()
+        flow.name = 'NewFlow'
+        flow.flowchart = Flowchart()
+        flow.flowchart.name = flow.name
+
+        model = ActorModel()
+        model.set(flow)
+
+        self.assertTrue(model.appendEmptyActor())
+        self.assertEqual(model.l[0].params.data, ACTOR_SAFETY_PARAM_DEFAULTS)
+
     def test_public_identity_strings(self):
         self.assertEqual(APP_DISPLAY_NAME, 'TOTK EventEditor')
         self.assertEqual(GITHUB_REPOSITORY_SLUG, 'cargocult-mods/TOTK-event-editor')
