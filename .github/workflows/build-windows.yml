@@ -25,6 +25,9 @@ jobs:
       - name: Prepare build metadata
         shell: pwsh
         run: |
+          # Production artifacts must never inherit local beta/test metadata.
+          Remove-Item "eventeditor/assets/test_build_info.json" -Force -ErrorAction SilentlyContinue
+
           if ("${{ github.ref_type }}" -eq "tag") {
             $releaseVersion = "${{ github.ref_name }}"
           } else {

@@ -21,6 +21,7 @@ from eventeditor.actor_safety_params import (
     collect_actor_safety_param_findings,
     repair_actor_safety_params,
 )
+from eventeditor.build_identity import build_about_version_html, load_test_build_info
 import eventeditor.mals as mals
 import eventeditor.totk_zs as totk_zs
 from eventeditor.actor_view import ActorView
@@ -41,6 +42,7 @@ GITHUB_RELEASES_URL = f'{GITHUB_REPOSITORY_URL}/releases'
 GITHUB_LATEST_RELEASE_API_URL = f'https://api.github.com/repos/{GITHUB_REPOSITORY_SLUG}/releases/latest'
 UPSTREAM_REPOSITORY_URL = 'https://github.com/zeldamods/event-editor'
 RELEASE_VERSION_ASSET = 'assets/release_version.txt'
+TEST_BUILD_INFO_ASSET = 'assets/test_build_info.json'
 UPDATE_SUMMARY_START = '<!-- update-summary:start -->'
 UPDATE_SUMMARY_END = '<!-- update-summary:end -->'
 UPDATE_CHECK_TIMEOUT_SECONDS = 5
@@ -1010,6 +1012,9 @@ def get_display_version() -> str:
         return packaged_version
     return normalize_display_version(_version.get_versions().get('version'))
 
+def read_packaged_test_build_info() -> typing.Optional[typing.Dict[str, typing.Any]]:
+    return load_test_build_info(Path(util.get_path(TEST_BUILD_INFO_ASSET)))
+
 def parse_release_version(version: typing.Optional[str]) -> typing.Optional[typing.Tuple[int, ...]]:
     if not version:
         return None
@@ -1085,15 +1090,16 @@ def build_update_info(current_version: str, release_info: typing.Dict[str, typin
         'summary': extract_update_summary(release_info.get('body')),
     }
 
-def build_about_html(version: str) -> str:
+def build_about_html(
+    version: str,
+    test_build_info: typing.Optional[typing.Dict[str, typing.Any]]=None,
+) -> str:
     return (
         f'<h2>{APP_DISPLAY_NAME}</h2>'
         '<p>A maintained EventEditor fork developed around Tears of the Kingdom modding workflows.</p>'
         f'<p><b>GitHub:</b> <a href="{GITHUB_REPOSITORY_URL}">{GITHUB_REPOSITORY_SLUG}</a></p>'
         f'<p><b>Upstream:</b> <a href="{UPSTREAM_REPOSITORY_URL}">zeldamods/event-editor</a></p>'
-        '<p><small>'
-        f'Version: {version}'
-        '</small></p>'
+        + build_about_version_html(version, test_build_info)
     )
 
 def set_application_display_name(display_name: str) -> None:
@@ -1565,7 +1571,11 @@ QToolButton:hover, QToolButton:pressed {
         help_menu.addAction(about_action)
 
     def about(self) -> None:
-        q.QMessageBox.about(self, f'About {APP_DISPLAY_NAME}', build_about_html(self._version))
+        q.QMessageBox.about(
+            self,
+            f'About {APP_DISPLAY_NAME}',
+            build_about_html(self._version, read_packaged_test_build_info()),
+        )
 
     def positionUpdateAvailableButton(self) -> None:
         if not hasattr(self, 'update_available_button'):

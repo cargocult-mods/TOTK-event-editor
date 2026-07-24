@@ -167,6 +167,18 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn('Version: v1.0.0', about_html)
         self.assertNotIn('Revision:', about_html)
 
+        test_about_html = build_about_html(
+            'v1.3.4',
+            {
+                'beta': 'beta4',
+                'built_at': '24/7/2026 11:57am',
+                'intended_features': ['Actor safety defaults'],
+            },
+        )
+        self.assertIn('Version: v1.3.4 beta4, built 24/7/2026 11:57am', test_about_html)
+        self.assertIn('Intended new features:', test_about_html)
+        self.assertIn('<li>Actor safety defaults</li>', test_about_html)
+
     def test_placeholder_versions_are_not_displayed(self):
         self.assertEqual(normalize_display_version('0+unknown'), 'development build')
         self.assertEqual(normalize_display_version('0+unknown.d20260607'), 'development build')

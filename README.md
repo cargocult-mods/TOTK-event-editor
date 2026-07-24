@@ -147,6 +147,21 @@ files.
 There is also a manual Linux build workflow. It is experimental and should not
 be treated as official support until it has been tested by real Linux users.
 
+Owner-testable Windows builds must identify themselves in **Help → About** with
+their beta number, actual build time, and intended feature list. Prepare that
+metadata in the disposable build workspace before running PyInstaller:
+
+```powershell
+python scripts/prepare_test_build_metadata.py `
+  --beta beta4 `
+  --feature "Audited node-specific switch branch labels" `
+  --feature "Actor safety defaults and save-time repair warnings"
+```
+
+The metadata file is optional. Production builds omit it and continue to show
+only the release version; the production Windows workflow explicitly removes
+test-build metadata before packaging.
+
 The app also supports a command-line `--event` selection path used by
 `Go to Event` and release smoke tests.
 
