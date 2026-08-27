@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -425,6 +426,93 @@ def find_filename_flow_name_mismatch(path: str, flow: typing.Optional[EventFlow]
     if not filename or not flow_names or filename in flow_names:
         return None
     return filename, flow_names
+
+FILENAME_FLOW_NAME_MISMATCH_SETTINGS_GROUP = 'save_warnings/filename_flow_name_mismatch'
+
+def filename_flow_name_mismatch_reference_paths(path: str) -> typing.List[str]:
+    owner_root = infer_eventflow_owner_root(path)
+    if not owner_root:
+        return []
+
+    path_parts = [part.lower() for part in Path(path).parts]
+    rsdb_dir = owner_root / 'romfs' / 'RSDB' if 'romfs' in path_parts else owner_root / 'RSDB'
+    reference_paths: typing.List[str] = []
+    for pattern in (
+        'EventSetting.Product.*.rstbl.byml.zs',
+        'GameAnalyzedEventInfo.Product.*.rstbl.byml.zs',
+    ):
+        for candidate in sorted(rsdb_dir.glob(pattern), key=lambda item: item.name.lower()):
+            try:
+                display_path = candidate.relative_to(owner_root)
+            except ValueError:
+                display_path = candidate
+            reference_paths.append(str(display_path))
+    return reference_paths
+
+def filename_flow_name_mismatch_warning_text(
+    path: str,
+    mismatch: typing.Tuple[str, typing.List[str]],
+) -> str:
+    filename, flow_names = mismatch
+    flow_name_text = ', '.join(flow_names) if flow_names else '(none)'
+    reference_paths = filename_flow_name_mismatch_reference_paths(path)
+    if reference_paths:
+        rsdb_files = '\n'.join(f'- {reference_path}' for reference_path in reference_paths)
+    else:
+        rsdb_files = (
+            '- RSDB\\EventSetting.Product.*.rstbl.byml.zs\n'
+            '- RSDB\\GameAnalyzedEventInfo.Product.*.rstbl.byml.zs'
+        )
+    return (
+        'This can be intentional, but each reference must use the right name.\n\n'
+        f'EventFlow file: {Path(path).name}\n'
+        f'File name: {filename}\n'
+        f'Internal flowchart name: {flow_name_text}\n\n'
+        f'Use the file name "{filename}" when this flow is referenced by:\n'
+        '- EventSetting.FlowchartFileName\n'
+        '- GameAnalyzedEventInfo.SubFlowList\n\n'
+        f'Relevant RSDB files:\n{rsdb_files}\n\n'
+        f'Use the internal flowchart name "{flow_name_text}" in:\n'
+        '- Subflow calls from other EventFlows'
+    )
+
+def _filename_flow_name_mismatch_settings_key(path: str) -> str:
+    normalized_path = os.path.normcase(os.path.abspath(path))
+    return hashlib.sha256(normalized_path.encode('utf-8')).hexdigest()
+
+def _filename_flow_name_mismatch_fingerprint(
+    mismatch: typing.Tuple[str, typing.List[str]],
+) -> str:
+    filename, flow_names = mismatch
+    return json.dumps(
+        [filename, sorted(flow_names)],
+        ensure_ascii=False,
+        separators=(',', ':'),
+    )
+
+def is_filename_flow_name_mismatch_warning_suppressed(
+    path: str,
+    mismatch: typing.Tuple[str, typing.List[str]],
+    settings: typing.Optional[qc.QSettings] = None,
+) -> bool:
+    active_settings = settings or qc.QSettings()
+    key = (
+        f'{FILENAME_FLOW_NAME_MISMATCH_SETTINGS_GROUP}/'
+        f'{_filename_flow_name_mismatch_settings_key(path)}'
+    )
+    return active_settings.value(key, '') == _filename_flow_name_mismatch_fingerprint(mismatch)
+
+def suppress_filename_flow_name_mismatch_warning(
+    path: str,
+    mismatch: typing.Tuple[str, typing.List[str]],
+    settings: typing.Optional[qc.QSettings] = None,
+) -> None:
+    active_settings = settings or qc.QSettings()
+    key = (
+        f'{FILENAME_FLOW_NAME_MISMATCH_SETTINGS_GROUP}/'
+        f'{_filename_flow_name_mismatch_settings_key(path)}'
+    )
+    active_settings.setValue(key, _filename_flow_name_mismatch_fingerprint(mismatch))
 
 def find_missing_internal_subflow_calls(flow: typing.Optional[EventFlow]) -> typing.List[str]:
     if not flow:
@@ -2501,19 +2589,30 @@ QToolButton:hover, QToolButton:pressed {
         mismatch = find_filename_flow_name_mismatch(path, self.flow)
         if not mismatch:
             return True
+        if is_filename_flow_name_mismatch_warning_suppressed(path, mismatch):
+            return True
 
-        filename, flow_names = mismatch
-        ret = q.QMessageBox.warning(
-            self,
-            'Filename does not match flow name',
-            'The filename does not match any named flow inside this file.\n\n'
-            'In TOTK this will probably cause the EventFlow not to run.\n\n'
-            f'Filename: {filename}\n'
-            f'Flow names: {", ".join(flow_names) if flow_names else "(none)"}',
-            q.QMessageBox.Ok | q.QMessageBox.Cancel,
-            q.QMessageBox.Cancel,
+        message_box = q.QMessageBox(self)
+        message_box.setIcon(q.QMessageBox.Warning)
+        message_box.setWindowTitle('Filename and flowchart name differ')
+        message_box.setText(
+            'Confirm that this filename mismatch is intentional before saving.'
         )
-        return ret == q.QMessageBox.Ok
+        message_box.setInformativeText(
+            filename_flow_name_mismatch_warning_text(path, mismatch)
+        )
+        do_not_remind = q.QCheckBox("Don't remind me again for this file")
+        message_box.setCheckBox(do_not_remind)
+        save_button = message_box.addButton('Save anyway', q.QMessageBox.AcceptRole)
+        cancel_button = message_box.addButton('Cancel save', q.QMessageBox.RejectRole)
+        message_box.setDefaultButton(cancel_button)
+        message_box.exec_()
+
+        if message_box.clickedButton() != save_button:
+            return False
+        if do_not_remind.isChecked():
+            suppress_filename_flow_name_mismatch_warning(path, mismatch)
+        return True
 
     def confirmInternalSubflowTargetsForSave(self) -> bool:
         missing_calls = find_missing_internal_subflow_calls(self.flow)

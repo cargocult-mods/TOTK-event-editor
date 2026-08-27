@@ -65,6 +65,7 @@ from eventeditor.__main__ import (
     UPDATE_SUMMARY_END,
     UPDATE_SUMMARY_START,
 )
+import eventeditor.__main__ as eventeditor_main
 import eventeditor.actor_xml as actor_xml
 import eventeditor.container_xml as container_xml
 import eventeditor.entry_point_tree_xml as entry_point_tree_xml
@@ -243,6 +244,80 @@ class ReconstructedQoLTests(unittest.TestCase):
             ('OtherName', ['DemoFlow']),
         )
 
+    def test_filename_flow_name_mismatch_warning_explains_reference_split(self):
+        self.assertTrue(hasattr(eventeditor_main, 'filename_flow_name_mismatch_warning_text'))
+        self.assertTrue(hasattr(eventeditor_main, 'filename_flow_name_mismatch_reference_paths'))
+        with tempfile.TemporaryDirectory() as tmp:
+            mod_root = Path(tmp) / 'Example mod'
+            flow_path = (
+                mod_root / 'romfs' / 'Event' / 'EventFlow'
+                / 'Durabilty_Restore.bfevfl.zs'
+            )
+            flow_path.parent.mkdir(parents=True)
+            flow_path.write_bytes(b'fixture')
+            rsdb = mod_root / 'romfs' / 'RSDB'
+            rsdb.mkdir(parents=True)
+            (rsdb / 'EventSetting.Product.112.rstbl.byml.zs').write_bytes(b'fixture')
+            (rsdb / 'GameAnalyzedEventInfo.Product.112.rstbl.byml.zs').write_bytes(b'fixture')
+
+            reference_paths = eventeditor_main.filename_flow_name_mismatch_reference_paths(str(flow_path))
+            self.assertEqual(
+                reference_paths,
+                [
+                    r'romfs\RSDB\EventSetting.Product.112.rstbl.byml.zs',
+                    r'romfs\RSDB\GameAnalyzedEventInfo.Product.112.rstbl.byml.zs',
+                ],
+            )
+
+            warning = eventeditor_main.filename_flow_name_mismatch_warning_text(
+                str(flow_path),
+                ('Durabilty_Restore', ['Durability_Restore']),
+            )
+            self.assertIn('This can be intentional', warning)
+            self.assertIn('Durabilty_Restore.bfevfl.zs', warning)
+            self.assertIn('Durabilty_Restore', warning)
+            self.assertIn('Durability_Restore', warning)
+            self.assertIn(
+                r'romfs\RSDB\GameAnalyzedEventInfo.Product.112.rstbl.byml.zs',
+                warning,
+            )
+            self.assertIn('EventSetting.FlowchartFileName', warning)
+            self.assertIn('GameAnalyzedEventInfo.SubFlowList', warning)
+            self.assertIn('Subflow calls from other EventFlows', warning)
+
+    def test_filename_flow_name_mismatch_suppression_is_path_and_mismatch_specific(self):
+        self.assertTrue(hasattr(eventeditor_main, 'is_filename_flow_name_mismatch_warning_suppressed'))
+        self.assertTrue(hasattr(eventeditor_main, 'suppress_filename_flow_name_mismatch_warning'))
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = qc.QSettings(
+                str(Path(tmp) / 'eventeditor-test.ini'),
+                qc.QSettings.IniFormat,
+            )
+            path = str(Path(tmp) / 'Durabilty_Restore.bfevfl.zs')
+            mismatch = ('Durabilty_Restore', ['Durability_Restore'])
+
+            self.assertFalse(
+                eventeditor_main.is_filename_flow_name_mismatch_warning_suppressed(path, mismatch, settings)
+            )
+            eventeditor_main.suppress_filename_flow_name_mismatch_warning(path, mismatch, settings)
+            settings.sync()
+            self.assertTrue(
+                eventeditor_main.is_filename_flow_name_mismatch_warning_suppressed(path, mismatch, settings)
+            )
+            self.assertFalse(
+                eventeditor_main.is_filename_flow_name_mismatch_warning_suppressed(
+                    str(Path(tmp) / 'Moved.bfevfl.zs'),
+                    mismatch,
+                    settings,
+                )
+            )
+            self.assertFalse(
+                eventeditor_main.is_filename_flow_name_mismatch_warning_suppressed(
+                    path,
+                    ('Durabilty_Restore', ['RenamedFlow']),
+                    settings,
+                )
+            )
     def test_missing_internal_subflow_helper(self):
         flow = EventFlow()
         flow.name = 'DemoFlow'
