@@ -547,6 +547,27 @@ class ReconstructedQoLTests(unittest.TestCase):
 
         self.assertEqual(collect_placeholder_save_warnings(flow), [])
 
+    def test_placeholder_save_dialog_explains_only_used_content_is_risky(self):
+        flow = make_action_flow(
+            'PlaceholderFlow',
+            '<placeholder actor>',
+            '<placeholder action>',
+            {},
+        )
+        view = types.SimpleNamespace(flow=flow)
+
+        with mock.patch.object(
+            eventeditor_main.q.QMessageBox,
+            'warning',
+            return_value=eventeditor_main.q.QMessageBox.Cancel,
+        ) as warning:
+            confirmed = eventeditor_main.MainWindow.confirmPlaceholderContentForSave(view)
+
+        self.assertFalse(confirmed)
+        warning_text = warning.call_args.args[2]
+        self.assertIn('Unused placeholder actor/action/query declarations are harmless', warning_text)
+        self.assertIn('used by an event/node', warning_text)
+
     def test_placeholder_save_warning_detection(self):
         clean_flow = make_action_flow('CleanFlow', 'Npc_EventStarter', 'EventTalk', {})
         self.assertEqual(collect_placeholder_save_warnings(clean_flow), [])
@@ -1487,7 +1508,7 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn('def extract_update_summary', main_py)
         self.assertIn('def confirmPlaceholderContentForSave(self) -> bool:', main_py)
         self.assertIn('self.confirmPlaceholderContentForSave() and', main_py)
-        self.assertIn('Saving it may cause the game to crash.', main_py)
+        self.assertIn('Placeholder content used by an event/node may cause the game to crash.', main_py)
         self.assertIn('q.QMessageBox.Ok | q.QMessageBox.Cancel', main_py)
         self.assertIn('def build_latest_release_request', main_py)
         self.assertIn('def build_update_info', main_py)

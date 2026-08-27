@@ -2636,8 +2636,9 @@ QToolButton:hover, QToolButton:pressed {
         ret = q.QMessageBox.warning(
             self,
             'Save warning',
-            'This file still contains placeholder actors or events/nodes.\n\n'
-            'Saving it may cause the game to crash.\n\n'
+            'One or more events/nodes still use placeholder content.\n\n'
+            'Unused placeholder actor/action/query declarations are harmless and are ignored. '
+            'Placeholder content used by an event/node may cause the game to crash.\n\n'
             'Continue saving anyway?\n\n'
             f'{listed_warnings}',
             q.QMessageBox.Ok | q.QMessageBox.Cancel,
