@@ -1,6 +1,9 @@
 import typing
 
 
+PLACEHOLDER_ACTOR_NAME = '<placeholder actor>'
+
+
 # Conservative baseline observed on vanilla TOTK EventFlow actors. Some fields
 # may turn out to be optional, but omitting the entire parameter container can
 # crash the game and these defaults have no known downside.
@@ -57,16 +60,39 @@ def _actor_display_name(actor: typing.Any) -> str:
     return '{}[{}]'.format(name, sub_name) if sub_name else name
 
 
+def _unwrap_reference(value: typing.Any) -> typing.Any:
+    for _ in range(8):
+        next_value = getattr(value, 'v', None)
+        if next_value is None or next_value is value:
+            return value
+        value = next_value
+    return value
+
+
+def _referenced_actor_ids(flowchart: typing.Any) -> typing.Set[int]:
+    referenced = set()
+    for event in getattr(flowchart, 'events', []) or []:
+        data = getattr(event, 'data', None)
+        actor_ref = getattr(data, 'actor', None)
+        actor = _unwrap_reference(actor_ref)
+        if actor is not None:
+            referenced.add(id(actor))
+    return referenced
+
+
 def collect_actor_safety_param_findings(flow: typing.Any) -> ActorSafetyParamFindings:
     no_params = []
     missing_some = []
 
     for flowchart in _iter_flowcharts(flow):
         flow_name = getattr(flowchart, 'name', '') or '<unnamed flowchart>'
+        referenced_actor_ids = _referenced_actor_ids(flowchart)
         for actor in getattr(flowchart, 'actors', []) or []:
+            actor_name = _actor_display_name(actor)
+            if actor_name == PLACEHOLDER_ACTOR_NAME and id(actor) not in referenced_actor_ids:
+                continue
             params = getattr(actor, 'params', None)
             data = getattr(params, 'data', None) if params is not None else None
-            actor_name = _actor_display_name(actor)
             missing = tuple(
                 key for key in ACTOR_SAFETY_PARAM_DEFAULTS
                 if not isinstance(data, dict) or key not in data

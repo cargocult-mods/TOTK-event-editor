@@ -2,6 +2,7 @@ import json
 import tempfile
 import types
 import unittest
+from unittest import mock
 import os
 from pathlib import Path
 import struct
@@ -318,6 +319,104 @@ class ReconstructedQoLTests(unittest.TestCase):
                     settings,
                 )
             )
+
+    def test_entry_point_deletion_warning_defaults_to_cancel(self):
+        import eventeditor.flowchart_view as flowchart_view
+
+        flowchart = types.SimpleNamespace(
+            entry_points=[types.SimpleNamespace(name='Restore_Menu')],
+        )
+        view = types.SimpleNamespace(
+            flow_data=types.SimpleNamespace(
+                flow=types.SimpleNamespace(flowchart=flowchart),
+                flow_path=r'C:\Mods\romfs\Event\EventFlow\Durabilty_Restore.bfevfl.zs',
+            ),
+        )
+
+        with mock.patch.object(
+            flowchart_view,
+            'collect_entry_point_subflow_callers',
+            return_value=[
+                'CC_CheatNPC_01.bfevfl.zs / CC_CheatNPC_01 / Event151 -> Restore_Menu',
+            ],
+        ), mock.patch.object(flowchart_view.q, 'QMessageBox') as message_box_class:
+            message_box = message_box_class.return_value
+            delete_button = object()
+            cancel_button = object()
+            message_box.addButton.side_effect = [delete_button, cancel_button]
+            message_box.clickedButton.return_value = cancel_button
+
+            confirmed = flowchart_view.FlowchartView._confirmEntryPointDeletion(view, [0])
+
+        self.assertFalse(confirmed)
+        message_box.setWindowTitle.assert_called_once_with('Entry point is still used')
+        message_box.setText.assert_called_once_with(
+            'One or more subflows call the selected entry point. '
+            'Deleting it will break those calls.'
+        )
+        message_box.setInformativeText.assert_called_once_with(
+            '- CC_CheatNPC_01.bfevfl.zs / CC_CheatNPC_01 / Event151 -> Restore_Menu'
+        )
+        self.assertEqual(
+            [call.args[0] for call in message_box.addButton.call_args_list],
+            ['Delete entry point anyway', 'Cancel deletion'],
+        )
+        message_box.setDefaultButton.assert_called_once_with(cancel_button)
+        message_box.exec_.assert_called_once_with()
+
+    def test_entry_point_callers_include_internal_and_neighboring_eventflows(self):
+        import eventeditor.flowchart_view as flowchart_view
+
+        self.assertTrue(hasattr(flowchart_view, 'collect_entry_point_subflow_callers'))
+
+        target = EventFlow()
+        target.name = 'Durability_Restore'
+        target.flowchart = Flowchart()
+        target.flowchart.name = target.name
+        target.flowchart.entry_points = [EntryPoint('Restore_Menu')]
+
+        internal_call = Event()
+        internal_call.name = 'EventInternal'
+        internal_call.data = SubFlowEvent()
+        internal_call.data.res_flowchart_name = target.name
+        internal_call.data.entry_point_name = 'Restore_Menu'
+        target.flowchart.events = [internal_call]
+
+        caller = EventFlow()
+        caller.name = 'CC_CheatNPC_01'
+        caller.flowchart = Flowchart()
+        caller.flowchart.name = caller.name
+        external_call = Event()
+        external_call.name = 'Event151'
+        external_call.data = SubFlowEvent()
+        external_call.data.res_flowchart_name = target.name
+        external_call.data.entry_point_name = 'Restore_Menu'
+        caller.flowchart.events = [external_call]
+        caller_entry = EntryPoint('Talk')
+        caller_entry.main_event.v = external_call
+        caller.flowchart.entry_points = [caller_entry]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            flow_dir = Path(tmp) / 'romfs' / 'Event' / 'EventFlow'
+            flow_dir.mkdir(parents=True)
+            target_path = flow_dir / 'Durabilty_Restore.bfevfl'
+            caller_path = flow_dir / 'CC_CheatNPC_01.bfevfl'
+            util.write_flow(str(caller_path), caller)
+
+            callers = flowchart_view.collect_entry_point_subflow_callers(
+                target,
+                str(target_path),
+                ['Restore_Menu'],
+            )
+
+        self.assertEqual(
+            callers,
+            [
+                'Durabilty_Restore.bfevfl / Durability_Restore / EventInternal -> Restore_Menu',
+                'CC_CheatNPC_01.bfevfl / CC_CheatNPC_01 / Event151 -> Restore_Menu',
+            ],
+        )
+
     def test_missing_internal_subflow_helper(self):
         flow = EventFlow()
         flow.name = 'DemoFlow'
@@ -432,6 +531,21 @@ class ReconstructedQoLTests(unittest.TestCase):
             'This actor will likely crash the game when it spawns.\n\n'
             'The highest proven number of subflows is 32.',
         )
+
+    def test_unused_placeholder_actor_declarations_do_not_warn_on_save(self):
+        flow = EventFlow()
+        flow.name = 'UnusedPlaceholderFlow'
+        flow.flowchart = Flowchart()
+        flow.flowchart.name = flow.name
+
+        actor = Actor()
+        actor.identifier.name = '<placeholder actor>'
+        actor.actions = [StringHolder('<placeholder action>')]
+        actor.queries = [StringHolder('<placeholder query>')]
+        flow.flowchart.actors = [actor]
+        flow.flowchart.events = []
+
+        self.assertEqual(collect_placeholder_save_warnings(flow), [])
 
     def test_placeholder_save_warning_detection(self):
         clean_flow = make_action_flow('CleanFlow', 'Npc_EventStarter', 'EventTalk', {})

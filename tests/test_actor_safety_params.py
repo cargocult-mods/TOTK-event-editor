@@ -24,8 +24,8 @@ def make_actor(name, params):
     )
 
 
-def make_flow(*actors):
-    flowchart = types.SimpleNamespace(name='TestFlow', actors=list(actors))
+def make_flow(*actors, events=()):
+    flowchart = types.SimpleNamespace(name='TestFlow', actors=list(actors), events=list(events))
     return types.SimpleNamespace(flowchart=flowchart)
 
 
@@ -50,6 +50,29 @@ class ActorSafetyParamTests(unittest.TestCase):
         self.assertEqual(
             findings.missing_some[0].missing_keys,
             tuple(key for key in ACTOR_SAFETY_PARAM_DEFAULTS if key != 'IsWorld'),
+        )
+
+    def test_unused_placeholder_actor_does_not_need_safety_parameters(self):
+        placeholder = make_actor('<placeholder actor>', None)
+
+        findings = collect_actor_safety_param_findings(make_flow(placeholder))
+
+        self.assertEqual(findings.no_params, [])
+        self.assertEqual(findings.missing_some, [])
+
+    def test_referenced_placeholder_actor_still_needs_safety_parameters(self):
+        placeholder = make_actor('<placeholder actor>', None)
+        event = types.SimpleNamespace(
+            data=types.SimpleNamespace(actor=types.SimpleNamespace(v=placeholder)),
+        )
+
+        findings = collect_actor_safety_param_findings(
+            make_flow(placeholder, events=[event])
+        )
+
+        self.assertEqual(
+            [finding.actor_name for finding in findings.no_params],
+            ['<placeholder actor>'],
         )
 
     def test_repair_adds_only_missing_baseline_params_and_preserves_values(self):

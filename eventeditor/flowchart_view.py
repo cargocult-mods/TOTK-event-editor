@@ -37,6 +37,142 @@ import PyQt5.QtWidgets as q # type: ignore
 EVENT_CLIPBOARD_PREFIX = 'eventeditor-event-nodes:v1:'
 MESSAGE_ID_PARAM_NAMES = ('MessageId', 'MessageID')
 
+EVENTFLOW_CALLER_SUFFIXES = (
+    '.bfevfl.zs',
+    '.bfevfl.zstd',
+    '.bfevfl.gz',
+    '.bfevfl',
+    '.evfl.zs',
+    '.evfl.zstd',
+    '.evfl.gz',
+    '.evfl',
+)
+
+
+def _iter_eventflow_flowcharts(flow: typing.Optional[EventFlow]) -> typing.Iterable[Flowchart]:
+    if not flow:
+        return
+
+    seen: typing.Set[int] = set()
+    candidates: typing.List[typing.Any] = [getattr(flow, 'flowchart', None)]
+    for attribute in ('flowcharts', 'flow_charts'):
+        collection = getattr(flow, attribute, None)
+        if not collection:
+            continue
+        values = collection.values() if isinstance(collection, dict) else getattr(collection, 'data', collection)
+        candidates.extend(getattr(item, 'v', item) for item in values)
+
+    for flowchart in candidates:
+        if flowchart is None or id(flowchart) in seen:
+            continue
+        seen.add(id(flowchart))
+        yield flowchart
+
+
+def _eventflow_directory_for_path(flow_path: str) -> Path:
+    path = Path(flow_path)
+    parts = path.parts
+    lower_parts = [part.lower() for part in parts]
+    for index in range(len(parts) - 1):
+        if lower_parts[index:index + 2] == ['event', 'eventflow']:
+            return Path(*parts[:index + 2])
+    return path.parent
+
+
+def _subflow_callers_in_flow(
+    flow: typing.Optional[EventFlow],
+    file_name: str,
+    target_flow_names: typing.Set[str],
+    entry_point_names: typing.Set[str],
+    allow_implicit_target: bool,
+) -> typing.List[str]:
+    callers: typing.List[str] = []
+    for flowchart in _iter_eventflow_flowcharts(flow):
+        source_flow_name = getattr(flowchart, 'name', '') or getattr(flow, 'name', '')
+        for event in getattr(flowchart, 'events', []) or []:
+            data = getattr(event, 'data', None)
+            if not isinstance(data, SubFlowEvent):
+                continue
+            if getattr(data, 'entry_point_name', '') not in entry_point_names:
+                continue
+            target_flow_name = getattr(data, 'res_flowchart_name', '') or ''
+            if target_flow_name:
+                if target_flow_name not in target_flow_names:
+                    continue
+            elif not allow_implicit_target:
+                continue
+            callers.append(
+                f'{file_name} / {source_flow_name or "<unnamed flowchart>"} / '
+                f'{getattr(event, "name", "") or "<unnamed event>"} -> '
+                f'{data.entry_point_name}'
+            )
+    return callers
+
+
+def collect_entry_point_subflow_callers(
+    flow: typing.Optional[EventFlow],
+    flow_path: str,
+    entry_point_names: typing.Iterable[str],
+) -> typing.List[str]:
+    targets = {name for name in entry_point_names if name}
+    if not flow or not flow_path or not targets:
+        return []
+
+    target_flow_names = {
+        name
+        for name in (
+            getattr(flow, 'name', ''),
+            *(getattr(flowchart, 'name', '') for flowchart in _iter_eventflow_flowcharts(flow)),
+        )
+        if name
+    }
+    target_path = Path(flow_path)
+    callers = _subflow_callers_in_flow(
+        flow,
+        target_path.name,
+        target_flow_names,
+        targets,
+        allow_implicit_target=True,
+    )
+
+    eventflow_dir = _eventflow_directory_for_path(flow_path)
+    if not eventflow_dir.is_dir():
+        return callers
+
+    try:
+        target_resolved = target_path.resolve()
+    except OSError:
+        target_resolved = target_path.absolute()
+
+    candidates = sorted(
+        (
+            candidate
+            for candidate in eventflow_dir.rglob('*')
+            if candidate.is_file()
+            and candidate.name.lower().endswith(EVENTFLOW_CALLER_SUFFIXES)
+        ),
+        key=lambda candidate: str(candidate).lower(),
+    )
+    for candidate in candidates:
+        try:
+            if candidate.resolve() == target_resolved:
+                continue
+            external_flow = EventFlow()
+            read_flow(str(candidate), external_flow)
+        except Exception:
+            continue
+        callers.extend(
+            _subflow_callers_in_flow(
+                external_flow,
+                candidate.name,
+                target_flow_names,
+                targets,
+                allow_implicit_target=False,
+            )
+        )
+    return callers
+
+
 class EntryPointVisibilityDelegate(q.QStyledItemDelegate):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1570,6 +1706,47 @@ class FlowchartView(q.QWidget):
         if not changed:
             self.onEntryPointVisibilityChanged()
 
+    def _confirmEntryPointDeletion(self, rows: typing.Iterable[int]) -> bool:
+        if not self.flow_data.flow or not self.flow_data.flow.flowchart:
+            return False
+
+        entry_points = self.flow_data.flow.flowchart.entry_points
+        valid_rows = sorted({row for row in rows if 0 <= row < len(entry_points)})
+        entry_point_names = [entry_points[row].name for row in valid_rows]
+        callers = collect_entry_point_subflow_callers(
+            self.flow_data.flow,
+            self.flow_data.flow_path,
+            entry_point_names,
+        )
+        if not callers:
+            return True
+
+        listed_callers = '\n'.join(f'- {caller}' for caller in callers[:30])
+        if len(callers) > 30:
+            listed_callers += f'\n- ...and {len(callers) - 30} more'
+
+        message_box = q.QMessageBox(self)
+        message_box.setIcon(q.QMessageBox.Warning)
+        message_box.setWindowTitle('Entry point is still used')
+        message_box.setText(
+            'One or more subflows call the selected entry point. '
+            'Deleting it will break those calls.'
+        )
+        message_box.setInformativeText(listed_callers)
+        delete_label = (
+            'Delete entry point anyway'
+            if len(valid_rows) == 1
+            else 'Delete entry points anyway'
+        )
+        delete_button = message_box.addButton(
+            delete_label,
+            q.QMessageBox.DestructiveRole,
+        )
+        cancel_button = message_box.addButton('Cancel deletion', q.QMessageBox.RejectRole)
+        message_box.setDefaultButton(cancel_button)
+        message_box.exec_()
+        return message_box.clickedButton() == delete_button
+
     def deleteSelectedEntryPoints(self) -> None:
         if not self.flow_data.flow or not self.flow_data.flow.flowchart:
             return
@@ -1684,6 +1861,8 @@ class FlowchartView(q.QWidget):
         self.flow_data.entry_point_model.append(ep)
 
     def webRemoveEntryPoint(self, ep_idx: int) -> None:
+        if not self._confirmEntryPointDeletion([ep_idx]):
+            return
         try:
             self.flow_data.entry_point_model.removeRow(ep_idx)
         except IndexError as e:
@@ -2388,6 +2567,8 @@ class FlowchartView(q.QWidget):
         entry_rows = sorted(set(self._selectedEntryPointRows(indices)), reverse=True)
         selected_indices = sorted(set(idx for idx in indices if idx >= 0), reverse=True)
         if not selected_indices and not entry_rows:
+            return
+        if entry_rows and not self._confirmEntryPointDeletion(entry_rows):
             return
         if not selected_indices and entry_rows:
             self.selected_event = None

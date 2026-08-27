@@ -599,14 +599,6 @@ def collect_placeholder_save_warnings(flow: typing.Optional[EventFlow]) -> typin
 
     for flowchart in iter_event_flow_flowcharts(flow):
         flow_name = getattr(flowchart, 'name', '') or '<unnamed flowchart>'
-        for actor in getattr(flowchart, 'actors', []) or []:
-            actor_location = f'{flow_name} actor list'
-            if _actor_name(actor) == PLACEHOLDER_ACTOR_NAME:
-                _append_placeholder_warning(warnings, seen, actor_location, 'placeholder actor')
-            if any(_evfl_name(action) == PLACEHOLDER_ACTION_NAME for action in getattr(actor, 'actions', []) or []):
-                _append_placeholder_warning(warnings, seen, actor_location, 'placeholder action')
-            if any(_evfl_name(query) == PLACEHOLDER_QUERY_NAME for query in getattr(actor, 'queries', []) or []):
-                _append_placeholder_warning(warnings, seen, actor_location, 'placeholder query')
 
         for event in getattr(flowchart, 'events', []) or []:
             location = _flowchart_event_location(flowchart, event)
