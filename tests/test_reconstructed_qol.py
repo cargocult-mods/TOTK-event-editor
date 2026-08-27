@@ -679,6 +679,41 @@ class ReconstructedQoLTests(unittest.TestCase):
                 str(preferred),
             )
 
+    def test_find_eventflow_file_by_internal_name_when_filename_differs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / 'Durabilty_Restore.bfevfl'
+
+            flow = make_action_flow(
+                'Durability_Restore',
+                'GameSystemActor',
+                'EventWait',
+                {'Frames': 1},
+            )
+            entry_point = EntryPoint('Restore_Menu')
+            entry_point.main_event.v = flow.flowchart.events[0]
+            flow.flowchart.entry_points = [entry_point]
+            with target.open('wb') as output:
+                flow.write(output)
+
+            self.assertEqual(
+                find_eventflow_file_in_directory(root, 'Durability_Restore'),
+                str(target),
+            )
+
+    def test_find_eventflow_file_by_filename_in_nested_mod_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'romfs' / 'Event' / 'EventFlow'
+            nested = root / 'Custom'
+            nested.mkdir(parents=True)
+            target = nested / 'NestedFlow.bfevfl.zs'
+            target.write_bytes(b'')
+
+            self.assertEqual(
+                find_eventflow_file_in_directory(root, 'NestedFlow'),
+                str(target),
+            )
+
     def test_vanilla_romfs_path_helper(self):
         old_romfs_path = totk_zs.get_romfs_path()
         try:

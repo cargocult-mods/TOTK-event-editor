@@ -879,21 +879,56 @@ def is_vanilla_romfs_path(path: str) -> bool:
         return False
     return is_path_relative_to(Path(path), Path(romfs_path))
 
-def find_eventflow_file_in_directory(directory: typing.Optional[Path], flow_name: str) -> str:
+def find_eventflow_file_in_directory(
+    directory: typing.Optional[Path],
+    flow_name: str,
+    inspect_internal_names: bool = True,
+) -> str:
     if not directory or not flow_name:
         return ''
     if not directory.is_dir():
         return ''
 
+    stripped_name = flow_filename_name_for_path(flow_name)
     direct_path = directory / flow_name
     if direct_path.is_file():
         return str(direct_path)
 
-    stripped_name = flow_filename_name_for_path(flow_name)
     for suffix in EVENTFLOW_OPEN_SUFFIX_CANDIDATES:
         candidate = directory / f'{stripped_name}{suffix}'
         if candidate.is_file():
             return str(candidate)
+
+    for suffix in EVENTFLOW_OPEN_SUFFIX_CANDIDATES:
+        nested_candidates = sorted(
+            directory.rglob(f'{stripped_name}{suffix}'),
+            key=lambda path: str(path).lower(),
+        )
+        for candidate in nested_candidates:
+            if candidate.is_file():
+                return str(candidate)
+
+    if not inspect_internal_names:
+        return ''
+
+    seen: typing.Set[str] = set()
+    for suffix in EVENTFLOW_OPEN_SUFFIX_CANDIDATES:
+        candidates = sorted(
+            directory.rglob(f'*{suffix}'),
+            key=lambda path: str(path).lower(),
+        )
+        for candidate in candidates:
+            key = os.path.normcase(os.path.normpath(str(candidate)))
+            if key in seen or not candidate.is_file():
+                continue
+            seen.add(key)
+            try:
+                candidate_flow = EventFlow()
+                util.read_flow(str(candidate), candidate_flow)
+            except Exception:
+                continue
+            if stripped_name in flow_names_for_flow(candidate_flow):
+                return str(candidate)
     return ''
 
 def current_mals_display_name(mode: str, current_path: str, flow_path: str, manual_path: str = '') -> str:
@@ -2259,7 +2294,11 @@ QToolButton:hover, QToolButton:pressed {
         romfs_path = totk_zs.get_romfs_path()
         if not romfs_path:
             return ''
-        return find_eventflow_file_in_directory(Path(romfs_path) / 'Event' / 'EventFlow', flow_name)
+        return find_eventflow_file_in_directory(
+            Path(romfs_path) / 'Event' / 'EventFlow',
+            flow_name,
+            inspect_internal_names=False,
+        )
 
     def openSubflowTarget(self, path: str, entry_point_name: str) -> None:
         if not self._launchNewInstanceForPath(path, entry_point_name=entry_point_name):
