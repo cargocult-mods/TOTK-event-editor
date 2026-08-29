@@ -8,6 +8,7 @@ from eventeditor.actor_safety_params import ensure_actor_safety_params
 import eventeditor.util as util
 from evfl import Actor, Container, Event, ActionEvent, SwitchEvent, ForkEvent, JoinEvent, SubFlowEvent
 from evfl.common import StringHolder
+from evfl.entry_point import EntryPoint
 from evfl.enums import EventType
 import evfl.event
 import PyQt5.QtCore as qc # type: ignore
@@ -159,29 +160,32 @@ class EventChooserDialog(q.QDialog):
         return self.selected_event
 
 class CheckableEventParentListModel(qc.QAbstractListModel):
-    def __init__(self, parent, child_event: Event, events: typing.List[Event]) -> None:
+    def __init__(self, parent, child_event: Event,
+                 parents: typing.List[typing.Union[Event, EntryPoint]]) -> None:
         super().__init__(parent)
-        self.entries: typing.List[typing.Tuple[Event, typing.Any]] = []
-        for event in events:
-            if isinstance(event.data, SwitchEvent):
-                for case, target in event.data.cases.items():
+        self.entries: typing.List[typing.Tuple[typing.Union[Event, EntryPoint], typing.Any]] = []
+        for parent_node in parents:
+            if isinstance(parent_node, EntryPoint):
+                self.entries.append((parent_node, None))
+            elif isinstance(parent_node.data, SwitchEvent):
+                for case, target in parent_node.data.cases.items():
                     if target.v == child_event:
-                        self.entries.append((event, case))
-            elif isinstance(event.data, ForkEvent):
-                for fork in event.data.forks:
+                        self.entries.append((parent_node, case))
+            elif isinstance(parent_node.data, ForkEvent):
+                for fork in parent_node.data.forks:
                     if fork.v == child_event:
-                        self.entries.append((event, fork))
+                        self.entries.append((parent_node, fork))
             else:
-                self.entries.append((event, None))
+                self.entries.append((parent_node, None))
 
         self.is_selected = [True] * len(self.entries)
 
-    def getSelectedEvents(self) -> typing.List[typing.Tuple[Event, typing.List[typing.Any]]]:
-        d: typing.DefaultDict[Event, typing.List[typing.Any]] = defaultdict(list)
-        for (event, branch), selected in zip(self.entries, self.is_selected):
+    def getSelectedParents(self) -> typing.List[typing.Tuple[typing.Union[Event, EntryPoint], typing.List[typing.Any]]]:
+        d: typing.DefaultDict[typing.Union[Event, EntryPoint], typing.List[typing.Any]] = defaultdict(list)
+        for (parent_node, branch), selected in zip(self.entries, self.is_selected):
             if not selected:
                 continue
-            d[event].append(branch)
+            d[parent_node].append(branch)
         return list(d.items())
 
     def selectAll(self) -> None:
@@ -211,7 +215,11 @@ class CheckableEventParentListModel(qc.QAbstractListModel):
     def data(self, index: qc.QModelIndex, role) -> qc.QVariant:
         row = index.row()
         if role == qc.Qt.DisplayRole or role == qc.Qt.ToolTipRole:
-            description = util.get_event_full_description(self.entries[row][0])
+            parent_node = self.entries[row][0]
+            if isinstance(parent_node, EntryPoint):
+                description = f'Entry point: {parent_node.name}'
+            else:
+                description = util.get_event_full_description(parent_node)
             branch = self.entries[row][1]
             if branch is not None:
                 if isinstance(branch, int):
@@ -224,9 +232,10 @@ class CheckableEventParentListModel(qc.QAbstractListModel):
         return qc.QVariant()
 
 class CheckableEventParentListWidget(q.QWidget):
-    def __init__(self, parent, child_event: Event, events: typing.List[Event]) -> None:
+    def __init__(self, parent, child_event: Event,
+                 parents: typing.List[typing.Union[Event, EntryPoint]]) -> None:
         super().__init__(parent)
-        self.model = CheckableEventParentListModel(self, child_event, events)
+        self.model = CheckableEventParentListModel(self, child_event, parents)
 
         select_btn_box = q.QHBoxLayout()
         all_btn = q.QPushButton('All')
@@ -245,5 +254,5 @@ class CheckableEventParentListWidget(q.QWidget):
         layout.addWidget(self.view)
         layout.setContentsMargins(0, 0, 0, 0)
 
-    def getSelectedEvents(self) -> typing.List[typing.Tuple[Event, typing.List[typing.Any]]]:
-        return self.model.getSelectedEvents()
+    def getSelectedParents(self) -> typing.List[typing.Tuple[typing.Union[Event, EntryPoint], typing.List[typing.Any]]]:
+        return self.model.getSelectedParents()

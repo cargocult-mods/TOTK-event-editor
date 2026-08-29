@@ -2683,22 +2683,38 @@ class FlowchartView(q.QWidget):
         self.delayedSelect(new_event)
         return new_event
 
+    def _parentNodesForGraphIds(self, parent_indices: typing.Iterable[int]) -> typing.List[typing.Union[Event, EntryPoint]]:
+        assert self.flow_data.flow and self.flow_data.flow.flowchart
+        flowchart = self.flow_data.flow.flowchart
+        parents: typing.List[typing.Union[Event, EntryPoint]] = []
+        for parent_index in parent_indices:
+            if 0 <= parent_index < len(flowchart.events):
+                parents.append(flowchart.events[parent_index])
+                continue
+            entry_point_row = -1000 - parent_index
+            if 0 <= entry_point_row < len(flowchart.entry_points):
+                parents.append(flowchart.entry_points[entry_point_row])
+        return parents
+
     def webAddEventAbove(self, parent_indices: typing.List[int], event_idx: int) -> None:
         if event_idx < 0:
             return
         assert self.flow_data.flow and self.flow_data.flow.flowchart
         event = self.flow_data.flow.flowchart.events[event_idx]
 
-        parent_events = [self.flow_data.flow.flowchart.events[i] for i in parent_indices if i >= 0]
-        list_widget = CheckableEventParentListWidget(None, event, parent_events)
-        if parent_events:
+        parent_nodes = self._parentNodesForGraphIds(parent_indices)
+        list_widget = CheckableEventParentListWidget(None, event, parent_nodes)
+        if parent_nodes:
             dialog = q.QDialog(self, qc.Qt.WindowTitleHint | qc.Qt.WindowSystemMenuHint)
             dialog.setWindowTitle('Add new event above...')
             btn_box = q.QDialogButtonBox(q.QDialogButtonBox.Ok | q.QDialogButtonBox.Cancel);
             btn_box.accepted.connect(dialog.accept)
             btn_box.rejected.connect(dialog.reject)
             dialog_layout = q.QVBoxLayout(dialog)
-            dialog_layout.addWidget(q.QLabel('Please select links that should be modified to point to the new event you are going to add.'))
+            dialog_layout.addWidget(q.QLabel(
+                'Select incoming links to reroute through the new event. '
+                'Leave a link unchecked to keep it parallel.'
+            ))
             dialog_layout.addWidget(list_widget)
             dialog_layout.addWidget(btn_box)
             ret = dialog.exec_()
@@ -2709,14 +2725,17 @@ class FlowchartView(q.QWidget):
         if not new_parent:
             return
 
-        self._doAddEventAbove(list_widget.getSelectedEvents(), event, new_parent)
+        self._doAddEventAbove(list_widget.getSelectedParents(), event, new_parent)
         self.flow_data.flowDataChanged.emit(FlowDataChangeReason.Events)
         self.delayedSelect(new_parent)
 
-    def _doAddEventAbove(self, parents: typing.List[typing.Tuple[Event, typing.List[typing.Any]]], event: Event, new_parent: Event) -> None:
+    def _doAddEventAbove(self, parents: typing.List[typing.Tuple[typing.Union[Event, EntryPoint], typing.List[typing.Any]]], event: Event, new_parent: Event) -> None:
         # Update the parents to point to the new parent.
         for parent, branches in parents:
-            if isinstance(parent.data, ActionEvent) or isinstance(parent.data, JoinEvent) or isinstance(parent.data, SubFlowEvent):
+            if isinstance(parent, EntryPoint):
+                if parent.main_event.v == event:
+                    parent.main_event.v = new_parent
+            elif isinstance(parent.data, ActionEvent) or isinstance(parent.data, JoinEvent) or isinstance(parent.data, SubFlowEvent):
                 # Easy case: just set the next pointer to the new parent.
                 parent.data.nxt.v = new_parent
 

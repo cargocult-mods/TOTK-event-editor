@@ -44,6 +44,8 @@ editing, building, and designing eventflows.
 - View flowcharts as editable node graphs.
 - Inspect actors, actions, queries, forks, joins, switches, and entry points.
 - Edit node type, actor, parameters, links, cases, and other event data.
+- When adding a new parent, choose whether entry-point links are rerouted
+  through it or left on the original node as a parallel start.
 - Read known switch branches by meaning, including comparison, choice, weather,
   time, inventory, dye-color, and other node-specific outcomes.
 - Give newly created actors a conservative vanilla parameter baseline and
