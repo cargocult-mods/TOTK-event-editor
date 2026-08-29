@@ -218,6 +218,31 @@ def load_messages_for_ids(path: str, message_ids: typing.Iterable[str], show_tag
     return messages
 
 
+def load_messages_for_msbt(path: str, prefix: str, show_tags: bool = True) -> typing.Dict[str, str]:
+    """Load every message from the MSBT identified by a MessageID prefix."""
+    archive_path = Path(path)
+    if not archive_path.is_file():
+        raise MessageArchiveError(f'Message archive not found: {archive_path}')
+    if not prefix:
+        return {}
+
+    data = archive_path.read_bytes()
+    if totk_zs.is_compressed_path(str(archive_path)):
+        data = totk_zs.decompress(str(archive_path), data)
+
+    messages: typing.Dict[str, str] = {}
+    prefix_basename = Path(prefix.replace('\\', '/')).name
+    for file_name, file_data in _iter_msbt_files(str(archive_path), data):
+        aliases = _candidate_prefix_aliases(file_name)
+        if prefix not in aliases and prefix_basename not in aliases:
+            continue
+        try:
+            messages.update(_parse_msbt(file_data, show_tags=show_tags))
+        except MessageArchiveError:
+            continue
+    return messages
+
+
 def _group_message_ids_by_prefix(message_ids: typing.Iterable[str]) -> typing.Dict[str, typing.Set[str]]:
     grouped: typing.Dict[str, typing.Set[str]] = {}
     for message_id in message_ids:

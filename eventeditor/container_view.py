@@ -270,6 +270,9 @@ class ContainerView(q.QWidget):
         self.proxy_model.sort(sort_column, self.sort_order)
 
     def onContextMenu(self, pos) -> None:
+        clicked_index = self.tview.indexAt(pos)
+        if clicked_index.isValid():
+            self.tview.setCurrentIndex(clicked_index)
         smodel = self.tview.selectionModel()
         if not smodel.selectedIndexes():
             return

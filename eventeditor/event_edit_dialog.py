@@ -2,10 +2,17 @@ import copy
 import typing
 
 import eventeditor.event_library as event_library
+import eventeditor.mals as mals
+from eventeditor.choice_label_picker import (
+    ChoiceLabelPickerDialog,
+    four_digit_choice_label_entries,
+)
 from eventeditor.event_library_dialog import EventLibraryDialog
 from eventeditor.actor_string_list_model import ActorStringListModel
 from eventeditor.container_model import (
     ContainerModel,
+    ContainerModelColumn,
+    is_choice_label_key,
     is_message_id_key,
 )
 from eventeditor.container_view import ContainerView
@@ -272,6 +279,97 @@ class ActorRelatedEventEditDialog(q.QDialog):
         self.param_view.pasteJsonRequested.connect(self.onPasteJsonRequested)
         self.param_view.addHeaderButton('Add Missing', self.onAddMissingParametersRequested)
         self.param_view.addHeaderButton('Remove Excess', self.onRemoveExcessParametersRequested)
+        if not self.is_switch:
+            self.param_view.addActionBuilder(self.addChoiceLabelPickerAction)
+
+    def addChoiceLabelPickerAction(self, menu: q.QMenu, index: qc.QModelIndex) -> None:
+        if not index.isValid() or not (0 <= index.row() < len(self.param_model.keys)):
+            return
+        key = self.param_model.keys[index.row()]
+        if not is_choice_label_key(key):
+            return
+        menu.addAction('Pick from existing...', lambda: self.onPickChoiceLabelRequested(index))
+
+    def _messageIdMsbtPrefix(self) -> str:
+        for key, value in self.modified_params.data.items():
+            if not is_message_id_key(key) or not isinstance(value, str) or ':' not in value:
+                continue
+            prefix, _label = value.split(':', 1)
+            return prefix.strip()
+        return ''
+
+    def _currentMessageArchivePath(self) -> str:
+        parent = self.parent()
+        if parent is not None and hasattr(parent, 'getMessageArchivePath'):
+            return str(parent.getMessageArchivePath() or '')
+        return ''
+
+    def onPickChoiceLabelRequested(self, index: qc.QModelIndex) -> None:
+        if not index.isValid() or not (0 <= index.row() < len(self.param_model.keys)):
+            return
+        key = self.param_model.keys[index.row()]
+        if not is_choice_label_key(key):
+            return
+
+        prefix = self._messageIdMsbtPrefix()
+        if not prefix:
+            q.QMessageBox.information(
+                self,
+                'Pick from existing ChoiceLabels',
+                'This action event does not have a usable MessageID, so EventEditor cannot identify the relevant MSBT file.',
+            )
+            return
+
+        archive_path = self._currentMessageArchivePath()
+        if not archive_path:
+            q.QMessageBox.information(
+                self,
+                'Pick from existing ChoiceLabels',
+                'No Mals/MSBT archive is selected. Select one from the Mals menu, then try again.',
+            )
+            return
+
+        try:
+            messages = mals.load_messages_for_msbt(archive_path, prefix, show_tags=False)
+        except Exception as exc:
+            q.QMessageBox.warning(
+                self,
+                'Pick from existing ChoiceLabels',
+                f'EventEditor could not read the relevant MSBT file.\n\n{exc}',
+            )
+            return
+
+        entries = four_digit_choice_label_entries(messages)
+        if not entries:
+            q.QMessageBox.information(
+                self,
+                'Pick from existing ChoiceLabels',
+                f'No four-digit integer labels were found in {prefix}.',
+            )
+            return
+
+        picker = ChoiceLabelPickerDialog(self, entries)
+        if picker.exec_() != q.QDialog.Accepted:
+            return
+        label = picker.selectedLabel()
+        if label is None:
+            return
+
+        current_value = self.modified_params.data[key]
+        if isinstance(current_value, int) and not isinstance(current_value, bool):
+            value: typing.Any = int(label)
+        elif isinstance(current_value, str):
+            value = label
+        else:
+            q.QMessageBox.warning(
+                self,
+                'Pick from existing ChoiceLabels',
+                f'{key} has an unsupported value type and was not changed.',
+            )
+            return
+
+        value_index = self.param_model.index(index.row(), ContainerModelColumn.Value)
+        self.param_model.setData(value_index, value, qc.Qt.EditRole)
 
     def parameterClipboardNodeType(self) -> str:
         return 'switch' if self.is_switch else 'action'
