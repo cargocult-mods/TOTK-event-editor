@@ -9,6 +9,7 @@ from evfl import Actor, Container, Event, EventFlow, Flowchart
 from evfl.common import StringHolder
 from evfl.event import ActionEvent, SwitchEvent
 from PyQt5 import QtCore as qc  # type: ignore
+from PyQt5 import QtTest as qt  # type: ignore
 from PyQt5 import QtWidgets as q  # type: ignore
 
 from eventeditor.choice_label_picker import (
@@ -67,7 +68,7 @@ class ChoiceLabelPickerTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = q.QApplication.instance() or q.QApplication([])
 
-    def test_filters_exact_four_digit_labels_and_sorts_descending(self):
+    def test_filters_exact_four_digit_labels_and_sorts_ascending(self):
         entries = four_digit_choice_label_entries({
             '0007': 'Seven',
             '1200': 'Twelve hundred',
@@ -77,21 +78,46 @@ class ChoiceLabelPickerTests(unittest.TestCase):
             '10000': 'Too long',
         })
         self.assertEqual(entries, [
-            ('9999', 'Last'),
-            ('1200', 'Twelve hundred'),
             ('0007', 'Seven'),
+            ('1200', 'Twelve hundred'),
+            ('9999', 'Last'),
         ])
 
     def test_picker_has_two_columns_and_accepts_double_click(self):
         dialog = ChoiceLabelPickerDialog(None, [('0012', 'Twelve'), ('0004', 'Four')])
         self.assertEqual(dialog.table.horizontalHeaderItem(0).text(), 'Label')
         self.assertEqual(dialog.table.horizontalHeaderItem(1).text(), 'Contents')
-        self.assertEqual(dialog.table.item(0, 0).text(), '0012')
+        self.assertEqual(dialog.table.item(0, 0).text(), '0004')
 
-        dialog.table.selectRow(1)
-        dialog.table.cellDoubleClicked.emit(1, 1)
+        dialog.table.selectRow(0)
+        dialog.table.cellDoubleClicked.emit(0, 1)
         self.assertEqual(dialog.result(), q.QDialog.Accepted)
         self.assertEqual(dialog.selectedLabel(), '0004')
+
+    def test_picker_headers_change_the_sort_order(self):
+        dialog = ChoiceLabelPickerDialog(None, [
+            ('0001', 'Zulu'),
+            ('0002', 'Alpha'),
+            ('0010', 'Mike'),
+        ])
+        dialog.show()
+        self.app.processEvents()
+
+        def visible_column(column):
+            return [dialog.table.item(row, column).text() for row in range(dialog.table.rowCount())]
+
+        self.assertEqual(visible_column(0), ['0001', '0002', '0010'])
+
+        header = dialog.table.horizontalHeader()
+        label_pos = qc.QPoint(header.sectionViewportPosition(0) + 5, header.height() // 2)
+        qt.QTest.mouseClick(header.viewport(), qc.Qt.LeftButton, pos=label_pos)
+        self.app.processEvents()
+        self.assertEqual(visible_column(0), ['0010', '0002', '0001'])
+
+        contents_pos = qc.QPoint(header.sectionViewportPosition(1) + 5, header.height() // 2)
+        qt.QTest.mouseClick(header.viewport(), qc.Qt.LeftButton, pos=contents_pos)
+        self.app.processEvents()
+        self.assertEqual(visible_column(1), ['Alpha', 'Mike', 'Zulu'])
 
     def test_action_dialog_adds_picker_only_for_choice_labels(self):
         flow_data = FlowData()

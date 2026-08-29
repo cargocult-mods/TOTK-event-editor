@@ -12,7 +12,7 @@ def four_digit_choice_label_entries(
         for label, contents in messages.items()
         if re.fullmatch(r'\d{4}', str(label))
     ]
-    return sorted(entries, key=lambda entry: int(entry[0]), reverse=True)
+    return sorted(entries, key=lambda entry: int(entry[0]))
 
 
 class ChoiceLabelPickerDialog(q.QDialog):
@@ -39,6 +39,8 @@ class ChoiceLabelPickerDialog(q.QDialog):
             self.table.setItem(row, 1, q.QTableWidgetItem(contents))
         self.table.horizontalHeader().setSectionResizeMode(0, q.QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, q.QHeaderView.Stretch)
+        self.table.setSortingEnabled(True)
+        self.table.sortItems(0, qc.Qt.AscendingOrder)
         self.table.resizeRowsToContents()
 
         self.button_box = q.QDialogButtonBox(q.QDialogButtonBox.Ok | q.QDialogButtonBox.Cancel)

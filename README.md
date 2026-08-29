@@ -52,7 +52,8 @@ editing, building, and designing eventflows.
   detect or repair missing actor safety parameters before saving.
 - See Mals/MSBT message text while working with dialogue events.
 - Right-click a `ChoiceLabel(N)` action parameter to pick a four-digit label
-  from the relevant MSBT while seeing each label's message contents.
+  from the relevant MSBT while seeing each label's message contents. Labels
+  start lowest-first, and either column header can be clicked to change sorting.
 - Browse actor-specific action/query possibilities with the Event Library.
 
 ## New - Event Library
