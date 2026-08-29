@@ -1,4 +1,4 @@
-name: Build Linux executable (experimental)
+name: Build Linux executable
 
 on:
   workflow_dispatch:
@@ -7,9 +7,12 @@ on:
         description: Optional version label to embed in the test build
         required: false
         default: ''
+  push:
+    tags:
+      - 'v*'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-linux:
@@ -48,10 +51,15 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Remove test-build metadata
+        run: rm -f eventeditor/assets/test_build_info.json
+
       - name: Prepare build metadata
         shell: bash
         run: |
-          if [ -n "${{ inputs.release_version }}" ]; then
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            releaseVersion="${{ github.ref_name }}"
+          elif [ -n "${{ inputs.release_version }}" ]; then
             releaseVersion="${{ inputs.release_version }}"
           else
             shortSha="${GITHUB_SHA::7}"
@@ -107,3 +115,14 @@ jobs:
         with:
           name: ${{ env.ARTIFACT_NAME }}
           path: ${{ env.PACKAGE_NAME }}
+
+      - name: Upload release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "$tag" --generate-notes || gh release view "$tag" >/dev/null
+          fi
+          gh release upload "$tag" "$PACKAGE_NAME" --clobber

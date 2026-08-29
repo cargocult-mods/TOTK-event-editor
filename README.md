@@ -7,12 +7,14 @@
 Download the latest release from the
 [TOTK EventEditor releases page](https://github.com/cargocult-mods/TOTK-event-editor/releases).
 
-For most users, download `TOTK-EventEditor_<version>-Windows.zip`, extract it,
-and run `TOTK EventEditor.exe` or `TOTK Event Editor <version>.exe` from the
+Windows users should download `TOTK-EventEditor_<version>-Windows.zip`, extract
+it, and run `TOTK EventEditor.exe` or `TOTK Event Editor <version>.exe` from the
 extracted folder.
 
-Linux builds may appear on some releases, but they are experimental and
-untested. The Windows zip is the supported release asset.
+Linux x86_64 users should download
+`TOTK-EventEditor_<version>-Linux-x86_64.tar.gz`, extract it, and run the
+versioned executable inside. Linux release builds use the same source and
+version as the Windows download.
 
 ## What this is
 
@@ -144,8 +146,8 @@ The Windows workflow builds a one-folder executable package rather than a
 single-file executable because Qt WebEngine needs companion DLLs and resource
 files.
 
-There is also a manual Linux build workflow. It is experimental and should not
-be treated as official support until it has been tested by real Linux users.
+Release tags build both Windows and Linux x86_64 downloads. The Linux workflow
+also remains manually runnable for test builds.
 
 Owner-testable Windows builds must identify themselves in **Help → About** with
 their beta number, actual build time, and intended feature list. Prepare that
@@ -191,8 +193,8 @@ event flow with `Flowchart` > `Export actor definition data to JSON`.
 
 ## Known issues
 
-- Linux builds are experimental. If the main window is blank after opening a
-  file, try running with `QTWEBENGINE_DISABLE_SANDBOX=1`.
+- If the Linux main window is blank after opening a file, try running with
+  `QTWEBENGINE_DISABLE_SANDBOX=1`.
 - Unlinking events around fork/join structures can break graph generation. Be
   careful when editing those sections.
 - The Event Library may report skipped files while collecting examples. This

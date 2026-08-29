@@ -262,12 +262,15 @@ class ReconstructedQoLTests(unittest.TestCase):
             (rsdb / 'GameAnalyzedEventInfo.Product.112.rstbl.byml.zs').write_bytes(b'fixture')
 
             reference_paths = eventeditor_main.filename_flow_name_mismatch_reference_paths(str(flow_path))
+            event_setting_path = str(
+                Path('romfs') / 'RSDB' / 'EventSetting.Product.112.rstbl.byml.zs'
+            )
+            analyzed_event_path = str(
+                Path('romfs') / 'RSDB' / 'GameAnalyzedEventInfo.Product.112.rstbl.byml.zs'
+            )
             self.assertEqual(
                 reference_paths,
-                [
-                    r'romfs\RSDB\EventSetting.Product.112.rstbl.byml.zs',
-                    r'romfs\RSDB\GameAnalyzedEventInfo.Product.112.rstbl.byml.zs',
-                ],
+                [event_setting_path, analyzed_event_path],
             )
 
             warning = eventeditor_main.filename_flow_name_mismatch_warning_text(
@@ -278,10 +281,7 @@ class ReconstructedQoLTests(unittest.TestCase):
             self.assertIn('Durabilty_Restore.bfevfl.zs', warning)
             self.assertIn('Durabilty_Restore', warning)
             self.assertIn('Durability_Restore', warning)
-            self.assertIn(
-                r'romfs\RSDB\GameAnalyzedEventInfo.Product.112.rstbl.byml.zs',
-                warning,
-            )
+            self.assertIn(analyzed_event_path, warning)
             self.assertIn('EventSetting.FlowchartFileName', warning)
             self.assertIn('GameAnalyzedEventInfo.SubFlowList', warning)
             self.assertIn('Subflow calls from other EventFlows', warning)
@@ -1738,11 +1738,13 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn('--name "$env:APP_BUNDLE_NAME"', workflow)
         self.assertIn('Compress-Archive -Path "dist/$env:APP_BUNDLE_NAME/*"', workflow)
 
-    def test_linux_build_is_manual_and_experimental(self):
+    def test_linux_build_runs_for_release_tags_and_remains_manually_runnable(self):
         workflow = (Path(__file__).resolve().parents[1] / '.github' / 'workflows' / 'build-linux-experimental.yml').read_text(encoding='utf-8')
-        self.assertIn('name: Build Linux executable (experimental)', workflow)
+        self.assertIn('name: Build Linux executable', workflow)
         self.assertIn('workflow_dispatch:', workflow)
-        self.assertNotIn('push:', workflow)
+        self.assertIn('push:', workflow)
+        self.assertIn("- 'v*'", workflow)
+        self.assertIn('contents: write', workflow)
         self.assertIn('runs-on: ubuntu-24.04', workflow)
         self.assertIn('QT_QPA_PLATFORM: offscreen', workflow)
         self.assertIn('QTWEBENGINE_DISABLE_SANDBOX', workflow)
@@ -1756,7 +1758,7 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn('xvfb-run -a "dist/$APP_BUNDLE_NAME/$APP_BUNDLE_NAME" --smoke-test', workflow)
         self.assertIn('tar -C dist -czf "$PACKAGE_NAME" "$APP_BUNDLE_NAME"', workflow)
         self.assertIn('TOTK-EventEditor_${safeVersion}-Linux-x86_64', workflow)
-        self.assertNotIn('gh release upload', workflow)
+        self.assertIn('gh release upload "$tag" "$PACKAGE_NAME" --clobber', workflow)
 
     def test_event_chooser_headers_sort_ascending_then_descending(self):
         source_root = Path(__file__).resolve().parents[1] / 'eventeditor'

@@ -96,7 +96,12 @@ jobs:
           $tag = "${{ github.ref_name }}"
           gh release view $tag *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag "$env:PACKAGE_NAME" --title $tag --generate-notes
-          } else {
-            gh release upload $tag "$env:PACKAGE_NAME" --clobber
+            gh release create $tag --title $tag --generate-notes
+            if ($LASTEXITCODE -ne 0) {
+              gh release view $tag
+              if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+              }
+            }
           }
+          gh release upload $tag "$env:PACKAGE_NAME" --clobber
