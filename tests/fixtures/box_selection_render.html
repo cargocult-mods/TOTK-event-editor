@@ -1,0 +1,128 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>EventEditor box-selection verification</title>
+  <link rel="stylesheet" href="../../eventeditor/assets/main.css">
+  <link rel="stylesheet" href="../../eventeditor/assets/lib/node_modules/d3-context-menu/css/d3-context-menu.css">
+</head>
+<body>
+  <svg id="graph"><g/></svg>
+  <script>
+    const signal = { connect() {} };
+    const graphData = [
+      {type: 'node', id: 0, node_type: 'action', data: {
+        name: 'First', actor: 'EventSystemActor', action: 'First'
+      }},
+      {type: 'node', id: 1, node_type: 'action', data: {
+        name: 'Second', actor: 'EventSystemActor', action: 'Second'
+      }},
+      {type: 'node', id: 2, node_type: 'action', data: {
+        name: 'Third', actor: 'EventSystemActor', action: 'Third'
+      }},
+      {type: 'edge', source: 0, target: 1, data: {value: 0}},
+      {type: 'edge', source: 1, target: 2, data: {value: 0}}
+    ];
+    const fixtureWidget = {
+      getJson(callback) { callback(graphData); },
+      emitReadySignal() {},
+      emitReloadedSignal() {},
+      emitEventSelectedSignal() {},
+      emitSelectedNodeIdsSignal() {},
+      flowDataChanged: signal,
+      fileLoaded: signal,
+      selectRequested: signal,
+      revealRequested: signal,
+      instantRevealRequested: signal,
+      preserveViewportRequested: signal,
+      fastGraphReloadRequested: signal,
+      eventNameVisibilityChanged: signal,
+      eventParamVisibilityChanged: signal,
+      eventTalkParamVisibilityChanged: signal,
+      eventMessageVisibilityChanged: signal,
+      actionProhibitionChanged: signal,
+      entryPointFilterStateChanged: signal
+    };
+    window.qt = {webChannelTransport: {}};
+    window.QWebChannel = function(_transport, callback) {
+      callback({objects: {widget: fixtureWidget}});
+    };
+  </script>
+  <script src="../../eventeditor/assets/lib/d3.v3.min.js"></script>
+  <script src="../../eventeditor/assets/lib/graphlib.min.js"></script>
+  <script src="../../eventeditor/assets/lib/dagre-d3.js"></script>
+  <script src="../../eventeditor/assets/lib/node_modules/d3-context-menu/js/d3-context-menu.js"></script>
+  <script src="../../eventeditor/assets/main.js"></script>
+  <script>
+    graph.render(0);
+    graph.renderer.fitToContent();
+
+    function boxAroundFirstTwoNodes() {
+      const first = document.getElementById('n0').getBoundingClientRect();
+      const second = document.getElementById('n1').getBoundingClientRect();
+      return {
+        left: Math.min(first.left, second.left) - 8,
+        top: Math.min(first.top, second.top) - 8,
+        right: Math.max(first.right, second.right) + 8,
+        bottom: Math.max(first.bottom, second.bottom) + 8
+      };
+    }
+
+    function startBoxSelection(additive) {
+      const box = boxAroundFirstTwoNodes();
+      const svg = document.getElementById('graph');
+      svg.dispatchEvent(new MouseEvent('mousedown', {
+        bubbles: true, button: 0, clientX: box.left, clientY: box.top,
+        shiftKey: true, ctrlKey: additive
+      }));
+      window.dispatchEvent(new MouseEvent('mousemove', {
+        bubbles: true, button: 0, clientX: box.right, clientY: box.bottom,
+        shiftKey: true, ctrlKey: additive
+      }));
+      return box;
+    }
+
+    function finishBoxSelection(box, additive) {
+      window.dispatchEvent(new MouseEvent('mouseup', {
+        bubbles: true, button: 0, clientX: box.right, clientY: box.bottom,
+        shiftKey: true, ctrlKey: additive
+      }));
+      document.getElementById('graph').dispatchEvent(new MouseEvent('click', {
+        bubbles: true, button: 0, clientX: box.right, clientY: box.bottom,
+        shiftKey: true, ctrlKey: additive
+      }));
+    }
+
+    window.runBoxSelectionTest = function() {
+      graph.renderer.clearSelection();
+      const box = startBoxSelection(false);
+      finishBoxSelection(box, false);
+      return graph.renderer.getSelectedIds();
+    };
+
+    window.runAdditiveBoxSelectionTest = function() {
+      graph.renderer.select(2, graph.g);
+      const box = startBoxSelection(true);
+      finishBoxSelection(box, true);
+      return graph.renderer.getSelectedIds();
+    };
+
+    window.runCancelledBoxSelectionTest = function() {
+      graph.renderer.select(2, graph.g);
+      startBoxSelection(false);
+      const previewIds = graph.renderer.getSelectedIds();
+      const marquee = document.querySelector('.box-selection-marquee');
+      const marqueeWasVisible = !!marquee && marquee.style.display !== 'none';
+      document.body.dispatchEvent(new KeyboardEvent('keydown', {
+        bubbles: true, key: 'Escape'
+      }));
+      return {
+        previewIds,
+        marqueeWasVisible,
+        selectedIds: graph.renderer.getSelectedIds(),
+        marqueeIsHidden: marquee.style.display === 'none'
+      };
+    };
+  </script>
+</body>
+</html>

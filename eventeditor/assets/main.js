@@ -30,6 +30,7 @@ const MESSAGE_BUBBLE_SOURCE_LINE_LIMIT = 3;
 const GRAPH_FIT_PADDING = 40;
 const GRAPH_FIT_MAX_SCALE = 1;
 const READABLE_NODE_SCALE = 1;
+const BOX_SELECTION_MIN_DRAG = 4;
 const ELIDED_NODE_WIDTH = 72;
 const ELIDED_NODE_HEIGHT = 32;
 const MESSAGE_SEPARATOR = '-'.repeat(30);
@@ -911,11 +912,14 @@ class Renderer {
     this.svgGroup = d3.select('svg g');
     this.selectedNodeIds = new Set();
     this.primarySelectedId = null;
+    this.boxSelection = null;
+    this.suppressNextBackgroundClick = false;
 
     this.nodeWhitelist = null;
 
     this.zoom = d3.behavior.zoom();
     this.lastZoomEventStart = null;
+    this.svg.node().addEventListener('mousedown', (event) => this._startBoxSelection(event), true);
     this.svg.call(this.zoom.on('zoom', () => this.updateTransform()));
     this.svg.call(this.zoom.on('zoomstart', () => this.lastZoomEventStart = new Date()));
 
@@ -923,6 +927,10 @@ class Renderer {
     // Unfortunately we need to do some extra work to determine whether the click event is caused
     // by zooming or is a simple click.
     this.svg.on('click', () => {
+      if (this.suppressNextBackgroundClick) {
+        this.suppressNextBackgroundClick = false;
+        return;
+      }
       // The zoom lasted more than 100 ms, so it's likely a zoom.
       if ((new Date() - this.lastZoomEventStart) >= 100) {
         return;
@@ -936,6 +944,152 @@ class Renderer {
       d3.contextMenu(handleBackgroundContextMenu).call(this.svg.node());
       clampContextMenuToViewport();
     });
+  }
+
+  _startBoxSelection(event) {
+    if (event.button !== 0 || !event.shiftKey || this._isTargetInsideNode(event.target)) {
+      return;
+    }
+
+    const svgRect = this.svg.node().getBoundingClientRect();
+    const initialIds = this.getSelectedIds();
+    this.boxSelection = {
+      startX: event.clientX,
+      startY: event.clientY,
+      currentX: event.clientX,
+      currentY: event.clientY,
+      svgLeft: svgRect.left,
+      svgTop: svgRect.top,
+      initialIds,
+      additive: !!(event.ctrlKey || event.metaKey),
+      moved: false,
+    };
+    this._showBoxSelectionMarquee();
+
+    this._boxSelectionMoveHandler = (moveEvent) => this._updateBoxSelection(moveEvent);
+    this._boxSelectionEndHandler = (upEvent) => this._finishBoxSelection(upEvent);
+    window.addEventListener('mousemove', this._boxSelectionMoveHandler, true);
+    window.addEventListener('mouseup', this._boxSelectionEndHandler, true);
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+
+  _selectionClientBox() {
+    if (!this.boxSelection) {
+      return null;
+    }
+    return {
+      left: Math.min(this.boxSelection.startX, this.boxSelection.currentX),
+      top: Math.min(this.boxSelection.startY, this.boxSelection.currentY),
+      right: Math.max(this.boxSelection.startX, this.boxSelection.currentX),
+      bottom: Math.max(this.boxSelection.startY, this.boxSelection.currentY),
+    };
+  }
+
+  _showBoxSelectionMarquee() {
+    if (!this.boxSelection) {
+      return;
+    }
+    const box = this._selectionClientBox();
+    let marquee = this.svg.select('.box-selection-marquee');
+    if (marquee.empty()) {
+      marquee = this.svg.append('rect').attr('class', 'box-selection-marquee');
+    }
+    marquee
+      .attr('x', box.left - this.boxSelection.svgLeft)
+      .attr('y', box.top - this.boxSelection.svgTop)
+      .attr('width', box.right - box.left)
+      .attr('height', box.bottom - box.top)
+      .style('display', null);
+  }
+
+  _nodeIdsInClientBox(box, g) {
+    const ids = [];
+    this.svgGroup.selectAll('.node').each(function(id) {
+      const node = g.node(id);
+      if (!node || node.synthetic) {
+        return;
+      }
+      const bounds = this.getBoundingClientRect();
+      const intersects = bounds.right >= box.left && bounds.left <= box.right &&
+        bounds.bottom >= box.top && bounds.top <= box.bottom;
+      if (intersects) {
+        const numericId = parseInt(id, 10);
+        if (!Number.isNaN(numericId)) {
+          ids.push(numericId);
+        }
+      }
+    });
+    return ids;
+  }
+
+  _boxSelectionIds() {
+    if (!this.boxSelection || !graph.g) {
+      return [];
+    }
+    const ids = this._nodeIdsInClientBox(this._selectionClientBox(), graph.g);
+    if (!this.boxSelection.additive) {
+      return ids;
+    }
+    return [...new Set([...this.boxSelection.initialIds, ...ids])];
+  }
+
+  _updateBoxSelection(event) {
+    if (!this.boxSelection) {
+      return;
+    }
+    this.boxSelection.currentX = event.clientX;
+    this.boxSelection.currentY = event.clientY;
+    this.boxSelection.moved = this.boxSelection.moved ||
+      Math.abs(this.boxSelection.currentX - this.boxSelection.startX) >= BOX_SELECTION_MIN_DRAG ||
+      Math.abs(this.boxSelection.currentY - this.boxSelection.startY) >= BOX_SELECTION_MIN_DRAG;
+    this._showBoxSelectionMarquee();
+    if (this.boxSelection.moved) {
+      this._applyMany(this._boxSelectionIds(), graph.g, false);
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+
+  _finishBoxSelection(event) {
+    if (!this.boxSelection) {
+      return;
+    }
+    const selection = this.boxSelection;
+    const selectedIds = selection.moved ? this._boxSelectionIds() : selection.initialIds;
+    this._removeBoxSelectionListeners();
+    this.boxSelection = null;
+    this.svg.select('.box-selection-marquee').style('display', 'none');
+    this.suppressNextBackgroundClick = selection.moved;
+    if (selection.moved) {
+      setTimeout(() => this.suppressNextBackgroundClick = false, 0);
+    }
+    this.selectMany(selectedIds, graph.g);
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+
+  _removeBoxSelectionListeners() {
+    if (this._boxSelectionMoveHandler) {
+      window.removeEventListener('mousemove', this._boxSelectionMoveHandler, true);
+      this._boxSelectionMoveHandler = null;
+    }
+    if (this._boxSelectionEndHandler) {
+      window.removeEventListener('mouseup', this._boxSelectionEndHandler, true);
+      this._boxSelectionEndHandler = null;
+    }
+  }
+
+  cancelBoxSelection() {
+    if (!this.boxSelection) {
+      return false;
+    }
+    const initialIds = this.boxSelection.initialIds;
+    this._removeBoxSelectionListeners();
+    this.boxSelection = null;
+    this.svg.select('.box-selection-marquee').style('display', 'none');
+    this.selectMany(initialIds, graph.g);
+    return true;
   }
 
   _restoreRawNodeLabels(visibleGraph) {
@@ -1253,7 +1407,7 @@ class Renderer {
     widget.emitSelectedNodeIdsSignal(this.getSelectedIds());
   }
 
-  selectMany(ids, g) {
+  _applyMany(ids, g, emitSignal=true) {
     this.clearSelectionWithoutEmittingSignal();
     for (const id of ids) {
       this._updateNodeSelectionClass(id, g, true);
@@ -1261,8 +1415,14 @@ class Renderer {
     }
     this.primarySelectedId = ids.length ? parseInt(ids[0], 10) : null;
     this._refreshPrimarySelection(g);
-    widget.emitEventSelectedSignal(this.getSelection());
-    widget.emitSelectedNodeIdsSignal(this.getSelectedIds());
+    if (emitSignal) {
+      widget.emitEventSelectedSignal(this.getSelection());
+      widget.emitSelectedNodeIdsSignal(this.getSelectedIds());
+    }
+  }
+
+  selectMany(ids, g) {
+    this._applyMany(ids, g, true);
   }
 
   getElement(id) {
@@ -2360,6 +2520,9 @@ document.body.addEventListener('keydown', (event) => {
   const key = event.key; // "ArrowRight", "ArrowLeft", "ArrowUp", or "ArrowDown"
 
   if (key === 'Escape') {
+    if (graph.renderer.cancelBoxSelection()) {
+      return;
+    }
     graph.renderer.clearSelection();
     return;
   }
