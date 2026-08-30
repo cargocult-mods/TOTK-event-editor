@@ -1732,11 +1732,11 @@ class ReconstructedQoLTests(unittest.TestCase):
         self.assertIn("parser.add_argument('--entry-point'", main_py)
         self.assertIn("self.selectStartupEntryPointIfRequested()", main_py)
 
-    def test_windows_build_names_release_executable_with_version(self):
+    def test_windows_build_uses_a_stable_install_name(self):
         workflow = (Path(__file__).resolve().parents[1] / '.github' / 'workflows' / 'build-windows.yml').read_text(encoding='utf-8')
-        self.assertIn('$appBundleName = "TOTK Event Editor $releaseVersion"', workflow)
+        self.assertIn('$appBundleName = "TOTK Event Editor"', workflow)
         self.assertIn('--name "$env:APP_BUNDLE_NAME"', workflow)
-        self.assertIn('Compress-Archive -Path "dist/$env:APP_BUNDLE_NAME/*"', workflow)
+        self.assertIn('Compress-Archive -Path "dist/$env:APP_BUNDLE_NAME"', workflow)
 
     def test_linux_build_runs_for_release_tags_and_remains_manually_runnable(self):
         workflow = (Path(__file__).resolve().parents[1] / '.github' / 'workflows' / 'build-linux-experimental.yml').read_text(encoding='utf-8')

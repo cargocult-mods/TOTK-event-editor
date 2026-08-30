@@ -67,7 +67,9 @@ jobs:
           fi
 
           safeVersion="$(printf '%s' "$releaseVersion" | sed 's/[^A-Za-z0-9._-]/-/g')"
-          appBundleName="TOTK Event Editor $releaseVersion"
+          # Keep the installed folder and executable stable so a release can be
+          # extracted over an existing installation without breaking launchers.
+          appBundleName="TOTK Event Editor"
           artifactName="TOTK-EventEditor_${safeVersion}-Linux-x86_64"
           packageName="$artifactName.tar.gz"
 

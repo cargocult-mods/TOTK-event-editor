@@ -8,13 +8,14 @@ Download the latest release from the
 [TOTK EventEditor releases page](https://github.com/cargocult-mods/TOTK-event-editor/releases).
 
 Windows users should download `TOTK-EventEditor_<version>-Windows.zip`, extract
-it, and run `TOTK EventEditor.exe` or `TOTK Event Editor <version>.exe` from the
-extracted folder.
+it, and run `TOTK Event Editor.exe` from the `TOTK Event Editor` folder. New
+releases use the same folder and executable names, so you can extract a newer
+archive over the existing installation without changing shortcuts.
 
 Linux x86_64 users should download
 `TOTK-EventEditor_<version>-Linux-x86_64.tar.gz`, extract it, and run the
-versioned executable inside. Linux release builds use the same source and
-version as the Windows download.
+`TOTK Event Editor` executable inside the matching folder. Linux release builds
+use the same source, version, and stable install naming as the Windows download.
 
 ## What this is
 
@@ -152,7 +153,10 @@ single-file executable because Qt WebEngine needs companion DLLs and resource
 files.
 
 Release tags build both Windows and Linux x86_64 downloads. The Linux workflow
-also remains manually runnable for test builds.
+also remains manually runnable for test builds. Download archive names include
+the release version, while their top-level folder and executable are always
+named `TOTK Event Editor`. This keeps installed paths and shortcuts unchanged
+when a newer archive is extracted over an older release.
 
 Owner-testable Windows builds must identify themselves in **Help → About** with
 their beta number, actual build time, and intended feature list. Prepare that

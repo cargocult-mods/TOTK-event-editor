@@ -16,6 +16,28 @@ def load_workflow(name):
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def test_release_archives_keep_versioned_download_names_but_stable_install_names(self):
+        windows_source, _ = load_workflow('build-windows.yml')
+        linux_source, _ = load_workflow('build-linux-experimental.yml')
+
+        self.assertIn('$appBundleName = "TOTK Event Editor"', windows_source)
+        self.assertIn('$artifactName = "TOTK-EventEditor_${safeVersion}-Windows"', windows_source)
+        self.assertIn(
+            'Compress-Archive -Path "dist/$env:APP_BUNDLE_NAME"',
+            windows_source,
+        )
+        self.assertNotIn(
+            'Compress-Archive -Path "dist/$env:APP_BUNDLE_NAME/*"',
+            windows_source,
+        )
+
+        self.assertIn('appBundleName="TOTK Event Editor"', linux_source)
+        self.assertIn('artifactName="TOTK-EventEditor_${safeVersion}-Linux-x86_64"', linux_source)
+        self.assertIn(
+            'tar -C dist -czf "$PACKAGE_NAME" "$APP_BUNDLE_NAME"',
+            linux_source,
+        )
+
     def test_linux_build_runs_for_tags_and_attaches_a_release_asset(self):
         source, workflow = load_workflow('build-linux-experimental.yml')
 

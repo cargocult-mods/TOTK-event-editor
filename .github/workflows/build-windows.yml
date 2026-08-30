@@ -35,7 +35,9 @@ jobs:
             $releaseVersion = "dev-" + $sha.Substring(0, 7)
           }
           $safeVersion = $releaseVersion -replace '[^A-Za-z0-9._-]', '-'
-          $appBundleName = "TOTK Event Editor $releaseVersion"
+          # Keep the installed folder and executable stable so a release can be
+          # extracted over an existing installation without breaking shortcuts.
+          $appBundleName = "TOTK Event Editor"
           $artifactName = "TOTK-EventEditor_${safeVersion}-Windows"
           $packageName = "$artifactName.zip"
 
@@ -79,7 +81,7 @@ jobs:
 
       - name: Package executable
         shell: pwsh
-        run: Compress-Archive -Path "dist/$env:APP_BUNDLE_NAME/*" -DestinationPath "$env:PACKAGE_NAME"
+        run: Compress-Archive -Path "dist/$env:APP_BUNDLE_NAME" -DestinationPath "$env:PACKAGE_NAME"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
