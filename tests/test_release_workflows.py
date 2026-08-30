@@ -65,6 +65,13 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn('gh release upload $tag "$env:PACKAGE_NAME" --clobber', source)
         self.assertNotIn('gh release create $tag "$env:PACKAGE_NAME"', source)
 
+    def test_release_titles_are_the_version_tag_only(self):
+        windows_source, _ = load_workflow('build-windows.yml')
+        linux_source, _ = load_workflow('build-linux-experimental.yml')
+
+        self.assertIn('gh release create $tag --title $tag', windows_source)
+        self.assertIn('gh release create "$tag" --title "$tag"', linux_source)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -158,6 +158,10 @@ the release version, while their top-level folder and executable are always
 named `TOTK Event Editor`. This keeps installed paths and shortcuts unchanged
 when a newer archive is extracted over an older release.
 
+Use the version tag alone as the GitHub release title, for example `v1.3.4`.
+Keeping the title short prevents the version number from being cropped in
+GitHub's release list.
+
 Owner-testable Windows builds must identify themselves in **Help → About** with
 their beta number, actual build time, and intended feature list. Prepare that
 metadata in the disposable build workspace before running PyInstaller:
