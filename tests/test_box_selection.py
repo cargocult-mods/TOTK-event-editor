@@ -13,6 +13,10 @@ from PyQt5.QtWebEngineWidgets import QWebEngineView  # type: ignore
 FIXTURE = Path(__file__).resolve().parent / 'fixtures' / 'box_selection_render.html'
 
 
+@unittest.skipIf(
+    os.environ.get('EVENTEDITOR_SKIP_RENDERED_TESTS') == '1',
+    'rendered QtWebEngine tests run on Linux CI and the real Windows build worker',
+)
 class BoxSelectionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
